@@ -1,0 +1,34 @@
+export interface Participant {
+  id: string;
+  name: string;
+  email: string;
+  availability: TimeSlot[];
+}
+
+export interface TimeSlot {
+  start: Date;
+  end: Date;
+  isAvailable: boolean;
+}
+
+export interface Meeting {
+  id: string;
+  title: string;
+  description: string;
+  participants: Participant[];
+  startTime: Date;
+  endTime: Date;
+  duration: number;
+  status: 'scheduled' | 'confirmed' | 'cancelled' | 'rescheduled';
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface MeetingFormData {
+  title: string;
+  description: string;
+  participants: string[];
+  duration: number;
+  preferredDate: Date;
+  preferredTimeSlots: TimeSlot[];
+}

@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  # MongoDB Database (Development)
+  mongodb-dev:
+    image: mongo:7.0
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=password
+      - MONGO_INITDB_DATABASE=meeting_scheduler
+    volumes:
+      - mongodb_dev_data:/data/db
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # Frontend React Application (Development)
+  frontend-dev:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend.dev
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+      - CHOKIDAR_USEPOLLING=true
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend-dev
+    networks:
+      - app-network
+    command: npm start
+
+  # Backend Python API (Development)
+  backend-dev:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "8000:8000"
+    environment:
+      - NODE_ENV=development
+      - PORT=8000
+      - FRONTEND_URL=http://localhost:3000
+      - MONGODB_URL=mongodb://admin:password@mongodb-dev:27017
+      - MONGODB_DATABASE=meeting_scheduler
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - mongodb-dev
+    networks:
+      - app-network
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  mongodb_dev_data:
+
+networks:
+  app-network:
+    driver: bridge
