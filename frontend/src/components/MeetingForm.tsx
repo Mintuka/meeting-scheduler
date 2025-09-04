@@ -37,13 +37,38 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
       alert('Please add at least one participant');
       return;
     }
+    console.log(data.preferredDate, data.startTime, data.endTime);
+    // Parse the date string manually to avoid timezone issues
+    const [year, month, day] = data.preferredDate.split('-').map(Number);
+    const meetingDate = new Date(year, month - 1, day); // month is 0-indexed in Date constructor
+    const startTimeStr = data.startTime;
+    const endTimeStr = data.endTime;
+    console.log(meetingDate, startTimeStr, endTimeStr);
+    // Create start datetime by combining date with start time
+    // Use local timezone to avoid UTC conversion issues
+    const startTime = new Date(meetingDate.getFullYear(), meetingDate.getMonth(), meetingDate.getDate());
+    const [startHour, startMinute] = startTimeStr.split(':').map(Number);
+    startTime.setHours(startHour, startMinute, 0, 0);
+    
+    // Create end datetime by combining date with end time
+    const endTime = new Date(meetingDate.getFullYear(), meetingDate.getMonth(), meetingDate.getDate());
+    const [endHour, endMinute] = endTimeStr.split(':').map(Number);
+    endTime.setHours(endHour, endMinute, 0, 0);
+    
+    // Validate that end time is after start time
+    if (endTime <= startTime) {
+      alert('End time must be after start time');
+      return;
+    }
 
     setIsLoading(true);
     try {
       const formData: MeetingFormData = {
         ...data,
         participants,
-        preferredDate: new Date(data.preferredDate),
+        startTime: data.startTime,
+        endTime: data.endTime,
+        preferredDate: data.preferredDate,
         preferredTimeSlots: []
       };
 
@@ -65,7 +90,7 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
   };
 
   return (
-    <div className="max-w-2xl mx-auto p-6 bg-white rounded-lg shadow-lg">
+    <div>
       <div className="mb-6">
         <h2 className="text-2xl font-bold text-gray-900 mb-2">Schedule Meeting with AI</h2>
         <p className="text-gray-600">Let AI find the best time for everyone to meet</p>
@@ -111,41 +136,52 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
           )}
         </div>
 
-        {/* Duration */}
+        {/* Meeting Date */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-2">
-            Duration (minutes)
-          </label>
-          <select
-            {...register('duration', { required: 'Duration is required' })}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-          >
-            <option value="">Select duration</option>
-            <option value={15}>15 minutes</option>
-            <option value={30}>30 minutes</option>
-            <option value={45}>45 minutes</option>
-            <option value={60}>1 hour</option>
-            <option value={90}>1.5 hours</option>
-            <option value={120}>2 hours</option>
-          </select>
-          {errors.duration && (
-            <p className="mt-1 text-sm text-red-600">{errors.duration.message}</p>
-          )}
-        </div>
-
-        {/* Preferred Date */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Preferred Date
+            Meeting Date
           </label>
           <input
             type="date"
-            {...register('preferredDate', { required: 'Preferred date is required' })}
+            {...register('preferredDate', { required: 'Meeting date is required' })}
             className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
           />
           {errors.preferredDate && (
             <p className="mt-1 text-sm text-red-600">{errors.preferredDate.message}</p>
           )}
+        </div>
+
+        {/* Start Time */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Start Time
+          </label>
+          <input
+            type="time"
+            {...register('startTime', { required: 'Start time is required' })}
+            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            placeholder="Select start time"
+          />
+          {errors.startTime && (
+            <p className="mt-1 text-sm text-red-600">{errors.startTime.message}</p>
+          )}
+        </div>
+
+        {/* End Time */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            End Time
+          </label>
+          <input
+            type="time"
+            {...register('endTime', { required: 'End time is required' })}
+            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            placeholder="Select end time"
+          />
+          {errors.endTime && (
+            <p className="mt-1 text-sm text-red-600">{errors.endTime.message}</p>
+          )}
+          <p className="mt-1 text-xs text-gray-500">End time must be after start time</p>
         </div>
 
         {/* Participants */}

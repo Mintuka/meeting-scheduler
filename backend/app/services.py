@@ -14,6 +14,7 @@ class MeetingService:
         """Create a new meeting with metadata"""
         from datetime import timedelta
         
+        # Create participants from email addresses
         participants = [
             {
                 "id": str(uuid.uuid4()),
@@ -24,18 +25,16 @@ class MeetingService:
             for email in meeting_data.participants
         ]
         
-        start_time = meeting_data.preferred_date.replace(
-            hour=9, minute=0, second=0, microsecond=0
-        )
-        end_time = start_time + timedelta(minutes=meeting_data.duration)
+        # Calculate duration from start and end times
+        duration = int((meeting_data.end_time - meeting_data.start_time).total_seconds() / 60)
         
         meeting_doc = {
             "title": meeting_data.title,
             "description": meeting_data.description,
             "participants": participants,
-            "start_time": start_time,
-            "end_time": end_time,
-            "duration": meeting_data.duration,
+            "start_time": meeting_data.start_time,
+            "end_time": meeting_data.end_time,
+            "duration": duration,
             "status": "scheduled",
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow(),
@@ -67,7 +66,7 @@ class MeetingService:
     async def update_meeting(self, meeting_id: str, update_data: MeetingUpdate) -> Optional[Meeting]:
         """Update a meeting"""
         try:
-            update_dict = update_data.dict(exclude_unset=True)
+            update_dict = update_data.model_dump(exclude_unset=True)
             update_dict["updated_at"] = datetime.utcnow()
             
             result = await self.collection.update_one(

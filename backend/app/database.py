@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 class MongoDB:
     client: Optional[AsyncIOMotorClient] = None
     database = None
-
+    # 
     @classmethod
     async def connect_to_mongo(cls):
         """Create database connection."""
@@ -40,7 +40,7 @@ class MongoDB:
     @classmethod
     def get_collection(cls, collection_name: str):
         """Get a collection from the database."""
-        if not cls.database:
+        if cls.database is None:
             raise RuntimeError("Database not initialized. Call connect_to_mongo() first.")
         return cls.database[collection_name]
 

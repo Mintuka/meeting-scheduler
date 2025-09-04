@@ -38,7 +38,7 @@ export const MeetingList: React.FC<MeetingListProps> = ({
 
   const handleSendReminder = async (meeting: Meeting) => {
     try {
-      await AISchedulerService.sendReminder(meeting);
+      await AISchedulerService.sendReminder(meeting.id);
       alert('Reminder sent successfully!');
     } catch (error) {
       console.error('Error sending reminder:', error);

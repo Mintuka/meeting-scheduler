@@ -1,31 +1,28 @@
 from datetime import datetime
-from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any, Annotated
+from pydantic import BaseModel, Field, BeforeValidator
 from bson import ObjectId
 import uuid
 
-class PyObjectId(ObjectId):
-    @classmethod
-    def __get_validators__(cls):
-        yield cls.validate
+def validate_object_id(v):
+    if isinstance(v, ObjectId):
+        return v
+    if isinstance(v, str):
+        if ObjectId.is_valid(v):
+            return ObjectId(v)
+        raise ValueError("Invalid ObjectId string")
+    raise ValueError("Invalid ObjectId")
 
-    @classmethod
-    def validate(cls, v):
-        if not ObjectId.is_valid(v):
-            raise ValueError("Invalid ObjectId")
-        return ObjectId(v)
-
-    @classmethod
-    def __modify_schema__(cls, field_schema):
-        field_schema.update(type="string")
+PyObjectId = Annotated[ObjectId, BeforeValidator(validate_object_id)]
 
 class MongoModel(BaseModel):
-    id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
+    id: Optional[PyObjectId] = Field(default_factory=ObjectId, alias="_id")
     
-    class Config:
-        allow_population_by_field_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
+    model_config = {
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True,
+        "json_encoders": {ObjectId: str}
+    }
 
 class TimeSlot(BaseModel):
     start: datetime
@@ -53,9 +50,10 @@ class Meeting(MongoModel):
 class MeetingCreate(BaseModel):
     title: str
     description: str
-    participants: List[str]
-    duration: int
-    preferred_date: datetime
+    participants: List[str]  # List of email addresses
+    start_time: datetime
+    end_time: datetime
+    preferred_date: Optional[datetime] = None
     metadata: Optional[Dict[str, Any]] = None
 
 class MeetingUpdate(BaseModel):

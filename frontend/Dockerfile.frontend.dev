@@ -8,11 +8,11 @@ COPY package*.json ./
 # Install dependencies
 RUN npm install
 
-# Copy source code
-COPY . .
+# Don't copy source code - we'll mount it as a volume for hot reloading
+# COPY . .
 
 # Expose port
 EXPOSE 3000
 
-# Start development server
+# Start development server with better hot reloading
 CMD ["npm", "start"]

@@ -22,13 +22,15 @@ export interface Meeting {
   status: 'scheduled' | 'confirmed' | 'cancelled' | 'rescheduled';
   createdAt: Date;
   updatedAt: Date;
+  metadata?: Record<string, any>;
 }
 
 export interface MeetingFormData {
   title: string;
   description: string;
   participants: string[];
-  duration: number;
-  preferredDate: Date;
+  startTime: string;
+  endTime: string;
+  preferredDate: string;
   preferredTimeSlots: TimeSlot[];
 }

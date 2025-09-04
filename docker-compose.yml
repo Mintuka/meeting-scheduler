@@ -29,6 +29,8 @@ services:
       - "3000:80"
     environment:
       - REACT_APP_API_URL=http://localhost:8000
+      - CHOKIDAR_USEPOLLING=true
+      - WATCHPACK_POLLING=true
     depends_on:
       - backend
     networks:
@@ -46,11 +48,8 @@ services:
       - NODE_ENV=production
       - PORT=8000
       - FRONTEND_URL=http://localhost:3000
-      - MONGODB_URL=mongodb://admin:password@mongodb:27017
+      - MONGODB_URL=mongodb+srv://mintesnot:b1JLUsSpRLXaEPCG@ma-8745.lxs3s.mongodb.net/?retryWrites=true&w=majority&appName=MA-8745
       - MONGODB_DATABASE=meeting_scheduler
-    depends_on:
-      mongodb:
-        condition: service_healthy
     networks:
       - app-network
     restart: unless-stopped

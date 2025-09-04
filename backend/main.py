@@ -1,8 +1,7 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.security import HTTPBearer
 from contextlib import asynccontextmanager
 import uvicorn
 from datetime import datetime
@@ -15,14 +14,22 @@ from app.database import MongoDB
 from app.models import Meeting, MeetingCreate, MeetingUpdate, Metadata
 from app.services import MeetingService, MetadataService, UserService
 
-meeting_service = MeetingService()
-metadata_service = MetadataService()
-user_service = UserService()
+# Initialize services after database connection
+meeting_service = None
+metadata_service = None
+user_service = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Starting Meeting Scheduler Backend...")
     await MongoDB.connect_to_mongo()
+    
+    # Initialize services after database connection
+    global meeting_service, metadata_service, user_service
+    meeting_service = MeetingService()
+    metadata_service = MetadataService()
+    user_service = UserService()
+    
     yield
     print("Shutting down Meeting Scheduler Backend...")
     await MongoDB.close_mongo_connection()
@@ -34,7 +41,8 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-security = HTTPBearer()
+# Temporarily disable authentication for development
+# security = HTTPBearer()
 
 app.add_middleware(
     CORSMiddleware,
@@ -49,7 +57,8 @@ app.add_middleware(
     allowed_hosts=["*"]
 )
 
-async def get_current_user(token: str = Depends(security)):
+# Mock authentication function that doesn't require a token
+async def get_current_user():
     return {"user_id": "mock_user", "email": "user@example.com"}
 
 @app.get("/health")
@@ -61,23 +70,21 @@ async def health_check():
     }
 
 @app.get("/api/meetings", response_model=List[Meeting])
-async def get_meetings(current_user: dict = Depends(get_current_user)):
+async def get_meetings():
     """Get all meetings for the current user"""
     return await meeting_service.get_all_meetings()
 
 @app.post("/api/meetings", response_model=Meeting)
-async def create_meeting(
-    meeting_data: MeetingCreate,
-    current_user: dict = Depends(get_current_user)
-):
+async def create_meeting(meeting_data: MeetingCreate):
     """Create a new meeting"""
+    # Validate that end time is after start time
+    if meeting_data.end_time <= meeting_data.start_time:
+        raise HTTPException(status_code=400, detail="End time must be after start time")
+    
     return await meeting_service.create_meeting(meeting_data, meeting_data.metadata)
 
 @app.get("/api/meetings/{meeting_id}", response_model=Meeting)
-async def get_meeting(
-    meeting_id: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def get_meeting(meeting_id: str):
     """Get a specific meeting by ID"""
     meeting = await meeting_service.get_meeting(meeting_id)
     if not meeting:
@@ -85,11 +92,7 @@ async def get_meeting(
     return meeting
 
 @app.put("/api/meetings/{meeting_id}", response_model=Meeting)
-async def update_meeting(
-    meeting_id: str,
-    meeting_update: MeetingUpdate,
-    current_user: dict = Depends(get_current_user)
-):
+async def update_meeting(meeting_id: str, meeting_update: MeetingUpdate):
     """Update a meeting"""
     meeting = await meeting_service.update_meeting(meeting_id, meeting_update)
     if not meeting:
@@ -97,10 +100,7 @@ async def update_meeting(
     return meeting
 
 @app.delete("/api/meetings/{meeting_id}")
-async def delete_meeting(
-    meeting_id: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def delete_meeting(meeting_id: str):
     """Delete a meeting"""
     success = await meeting_service.delete_meeting(meeting_id)
     if not success:
@@ -108,10 +108,7 @@ async def delete_meeting(
     return {"message": "Meeting deleted successfully"}
 
 @app.post("/api/meetings/{meeting_id}/send-reminder")
-async def send_reminder(
-    meeting_id: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def send_reminder(meeting_id: str):
     """Send reminder for a meeting"""
     meeting = await meeting_service.get_meeting(meeting_id)
     if not meeting:
@@ -125,17 +122,13 @@ async def create_metadata(
     key: str,
     value: Any,
     metadata_type: str,
-    description: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
+    description: Optional[str] = None
 ):
     """Create metadata entry"""
     return await metadata_service.create_metadata(key, value, metadata_type, description)
 
 @app.get("/api/metadata/{key}", response_model=Metadata)
-async def get_metadata(
-    key: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def get_metadata(key: str):
     """Get metadata by key"""
     metadata = await metadata_service.get_metadata(key)
     if not metadata:
@@ -143,7 +136,7 @@ async def get_metadata(
     return metadata
 
 @app.get("/api/metadata", response_model=List[Metadata])
-async def get_all_metadata(current_user: dict = Depends(get_current_user)):
+async def get_all_metadata():
     """Get all metadata"""
     return await metadata_service.get_all_metadata()
 
@@ -152,8 +145,7 @@ async def update_metadata(
     key: str,
     value: Any,
     metadata_type: str,
-    description: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
+    description: Optional[str] = None
 ):
     """Update metadata"""
     metadata = await metadata_service.update_metadata(key, value, metadata_type, description)
@@ -162,10 +154,7 @@ async def update_metadata(
     return metadata
 
 @app.delete("/api/metadata/{key}")
-async def delete_metadata(
-    key: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def delete_metadata(key: str):
     """Delete metadata by key"""
     success = await metadata_service.delete_metadata(key)
     if not success:
@@ -175,8 +164,7 @@ async def delete_metadata(
 @app.put("/api/meetings/{meeting_id}/metadata")
 async def update_meeting_metadata(
     meeting_id: str,
-    metadata: Dict[str, Any],
-    current_user: dict = Depends(get_current_user)
+    metadata: Dict[str, Any]
 ):
     """Update meeting metadata"""
     meeting = await meeting_service.update_meeting_metadata(meeting_id, metadata)

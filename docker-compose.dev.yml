@@ -26,6 +26,8 @@ services:
     environment:
       - REACT_APP_API_URL=http://localhost:8000
       - CHOKIDAR_USEPOLLING=true
+      - WATCHPACK_POLLING=true
+      - FAST_REFRESH=true
     volumes:
       - ./frontend:/app
       - /app/node_modules
@@ -46,12 +48,10 @@ services:
       - NODE_ENV=development
       - PORT=8000
       - FRONTEND_URL=http://localhost:3000
-      - MONGODB_URL=mongodb://admin:password@mongodb-dev:27017
+      - MONGODB_URL=mongodb+srv://mintesnot:b1JLUsSpRLXaEPCG@ma-8745.lxs3s.mongodb.net/?retryWrites=true&w=majority&appName=MA-8745
       - MONGODB_DATABASE=meeting_scheduler
     volumes:
       - ./backend:/app
-    depends_on:
-      - mongodb-dev
     networks:
       - app-network
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
