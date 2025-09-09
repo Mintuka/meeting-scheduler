@@ -5,6 +5,7 @@ import { MeetingForm } from './MeetingForm';
 import { MeetingList } from './MeetingList';
 import { Modal } from './Modal';
 import { AISchedulerService } from '../services/AISchedulerService';
+import { notificationService } from '../services/NotificationService';
 
 export const Dashboard: React.FC = () => {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
@@ -24,7 +25,9 @@ export const Dashboard: React.FC = () => {
       setMeetings(fetchedMeetings);
     } catch (err) {
       console.error('Error loading meetings:', err);
-      setError('Failed to load meetings. Please try again.');
+      const errorMessage = 'Failed to load meetings. Please try again.';
+      setError(errorMessage);
+      notificationService.error('Load Error', errorMessage);
     } finally {
       setIsLoading(false);
     }
@@ -33,19 +36,26 @@ export const Dashboard: React.FC = () => {
   const handleMeetingCreated = (meeting: Meeting) => {
     setMeetings([meeting, ...meetings]);
     setShowForm(false);
+    notificationService.meetingCreated(meeting);
   };
 
   const handleMeetingUpdated = (updatedMeeting: Meeting) => {
     setMeetings(meetings.map(m => m.id === updatedMeeting.id ? updatedMeeting : m));
+    notificationService.meetingUpdated(updatedMeeting, 'Meeting details have been updated');
   };
 
   const handleMeetingDeleted = async (meetingId: string) => {
     try {
+      const meetingToDelete = meetings.find(m => m.id === meetingId);
       await AISchedulerService.deleteMeeting(meetingId);
       setMeetings(meetings.filter(m => m.id !== meetingId));
+      if (meetingToDelete) {
+        notificationService.meetingDeleted(meetingToDelete.title);
+      }
     } catch (error) {
       console.error('Error deleting meeting:', error);
-      alert('Failed to delete meeting. Please try again.');
+      const errorMessage = 'Failed to delete meeting. Please try again.';
+      notificationService.error('Delete Error', errorMessage);
     }
   };
 
@@ -127,7 +137,7 @@ export const Dashboard: React.FC = () => {
               </div>
             </div>
           </div>
-          <div className="bg-white rounded-lg shadow p-6">
+          {/* <div className="bg-white rounded-lg shadow p-6">
             <div className="flex items-center">
               <Users className="h-8 w-8 text-green-600 mr-3" />
               <div>
@@ -135,7 +145,7 @@ export const Dashboard: React.FC = () => {
                 <p className="text-2xl font-bold text-gray-900">{totalParticipants}</p>
               </div>
             </div>
-          </div>
+          </div> */}
           <div className="bg-white rounded-lg shadow p-6">
             <div className="flex items-center">
               <Clock className="h-8 w-8 text-yellow-600 mr-3" />

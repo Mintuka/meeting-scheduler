@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { useForm } from 'react-hook-form';
-import { Calendar, Clock, Users, Mail, Loader2, CheckCircle } from 'lucide-react';
+import { Calendar, Loader2, CheckCircle } from 'lucide-react';
 import { MeetingFormData } from '../types';
 import { AISchedulerService } from '../services/AISchedulerService';
+import { notificationService } from '../services/NotificationService';
 
 interface MeetingFormProps {
   onMeetingCreated: (meeting: any) => void;
@@ -34,7 +35,7 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
 
   const onSubmit = async (data: MeetingFormData) => {
     if (participants.length === 0) {
-      alert('Please add at least one participant');
+      notificationService.warning('No Participants', 'Please add at least one participant');
       return;
     }
     console.log(data.preferredDate, data.startTime, data.endTime);
@@ -57,7 +58,7 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
     
     // Validate that end time is after start time
     if (endTime <= startTime) {
-      alert('End time must be after start time');
+      notificationService.error('Invalid Time', 'End time must be after start time');
       return;
     }
 
@@ -80,10 +81,13 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
       reset();
       setParticipants([]);
       
+      // Show success notification
+      notificationService.meetingInvitationSent(meeting);
+      
       setTimeout(() => setIsSuccess(false), 3000);
     } catch (error) {
       console.error('Error creating meeting:', error);
-      alert('Failed to create meeting. Please try again.');
+      notificationService.failedToCreateMeeting('Failed to create meeting. Please try again.');
     } finally {
       setIsLoading(false);
     }

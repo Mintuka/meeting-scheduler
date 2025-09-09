@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { format } from 'date-fns';
-import { Calendar, Clock, Users, Mail, Edit, Trash2, RefreshCw } from 'lucide-react';
+import { Calendar, Clock, Users, Mail, Edit, Trash2, RefreshCw, Bell } from 'lucide-react';
 import { Meeting } from '../types';
 import { AISchedulerService } from '../services/AISchedulerService';
+import { notificationService } from '../services/NotificationService';
 
 interface MeetingListProps {
   meetings: Meeting[];
@@ -28,9 +29,10 @@ export const MeetingList: React.FC<MeetingListProps> = ({
       
       const updatedMeeting = await AISchedulerService.rescheduleMeeting(meeting, newTimeSlot);
       onMeetingUpdated(updatedMeeting);
+      notificationService.meetingUpdated(updatedMeeting, 'Meeting has been rescheduled to tomorrow');
     } catch (error) {
       console.error('Error rescheduling meeting:', error);
-      alert('Failed to reschedule meeting');
+      notificationService.error('Reschedule Error', 'Failed to reschedule meeting');
     } finally {
       setReschedulingMeeting(null);
     }
@@ -39,10 +41,20 @@ export const MeetingList: React.FC<MeetingListProps> = ({
   const handleSendReminder = async (meeting: Meeting) => {
     try {
       await AISchedulerService.sendReminder(meeting.id);
-      alert('Reminder sent successfully!');
+      notificationService.meetingReminderSent(meeting);
     } catch (error) {
       console.error('Error sending reminder:', error);
-      alert('Failed to send reminder');
+      notificationService.error('Reminder Error', 'Failed to send reminder');
+    }
+  };
+
+  const handleSendInvitation = async (meeting: Meeting) => {
+    try {
+      await AISchedulerService.sendMeetingInvitation(meeting);
+      notificationService.meetingInvitationSent(meeting);
+    } catch (error) {
+      console.error('Error sending invitation:', error);
+      notificationService.failedToSendInvitations(meeting, 'Failed to send invitations');
     }
   };
 
@@ -85,6 +97,20 @@ export const MeetingList: React.FC<MeetingListProps> = ({
               </span>
             </div>
             <div className="flex space-x-2">
+              <button
+                onClick={() => handleSendInvitation(meeting)}
+                className="p-2 text-green-600 hover:bg-green-50 rounded-md"
+                title="Send Invitation"
+              >
+                <Mail className="h-4 w-4" />
+              </button>
+              <button
+                onClick={() => handleSendReminder(meeting)}
+                className="p-2 text-blue-600 hover:bg-blue-50 rounded-md"
+                title="Send Reminder"
+              >
+                <Bell className="h-4 w-4" />
+              </button>
               <button
                 onClick={() => handleReschedule(meeting)}
                 disabled={reschedulingMeeting === meeting.id}
@@ -130,12 +156,6 @@ export const MeetingList: React.FC<MeetingListProps> = ({
                 <Mail className="h-4 w-4 mr-2" />
                 <span>Participants:</span>
               </div>
-              <button
-                onClick={() => handleSendReminder(meeting)}
-                className="text-sm text-blue-600 hover:text-blue-800 font-medium"
-              >
-                Send Reminder
-              </button>
             </div>
             <div className="mt-2 flex flex-wrap gap-2">
               {meeting.participants.map((participant) => (

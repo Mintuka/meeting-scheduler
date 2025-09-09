@@ -13,11 +13,34 @@ import uuid
 from app.database import MongoDB
 from app.models import Meeting, MeetingCreate, MeetingUpdate, Metadata
 from app.services import MeetingService, MetadataService, UserService
+from app.notification_service import notification_service
+from app.email_reply_listener import EmailReplyListener
+
+# Request models for notification endpoints
+class UpdateNotificationRequest(BaseModel):
+    changes_description: str
+
+class CancellationNotificationRequest(BaseModel):
+    cancellation_reason: str
 
 # Initialize services after database connection
 meeting_service = None
 metadata_service = None
 user_service = None
+
+async def process_email_reply(meeting_id: str, from_email: str, action: str, payload: str | None):
+    # Basic placeholder actions: record metadata; real logic can update meetings
+    metadata_key = f"reply:{meeting_id}:{from_email}:{datetime.utcnow().isoformat()}"
+    await metadata_service.create_metadata(
+        key=metadata_key,
+        value={"action": action, "payload": payload},
+        metadata_type="email_reply",
+        description="Email reply processed"
+    )
+
+
+reply_listener: EmailReplyListener | None = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -29,9 +52,14 @@ async def lifespan(app: FastAPI):
     meeting_service = MeetingService()
     metadata_service = MetadataService()
     user_service = UserService()
+    global reply_listener
+    reply_listener = EmailReplyListener(process_email_reply)
+    await reply_listener.start()
     
     yield
     print("Shutting down Meeting Scheduler Backend...")
+    if reply_listener:
+        await reply_listener.stop()
     await MongoDB.close_mongo_connection()
 
 app = FastAPI(
@@ -107,15 +135,85 @@ async def delete_meeting(meeting_id: str):
         raise HTTPException(status_code=404, detail="Meeting not found")
     return {"message": "Meeting deleted successfully"}
 
-@app.post("/api/meetings/{meeting_id}/send-reminder")
-async def send_reminder(meeting_id: str):
-    """Send reminder for a meeting"""
+@app.post("/api/meetings/{meeting_id}/send-invitation")
+async def send_invitation(meeting_id: str):
+    """Send invitation for a meeting to all participants"""
     meeting = await meeting_service.get_meeting(meeting_id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
     
-    print(f"Sending reminder for meeting: {meeting.title}")
-    return {"message": "Reminder sent successfully"}
+    # Send invitations to all participants
+    results = await notification_service.send_bulk_invitations(meeting)
+    
+    successful_sends = sum(1 for success in results.values() if success)
+    total_participants = len(meeting.participants)
+    
+    return {
+        "message": f"Invitations sent to {successful_sends}/{total_participants} participants",
+        "results": results
+    }
+
+@app.post("/api/meetings/{meeting_id}/send-reminder")
+async def send_reminder(meeting_id: str):
+    """Send reminder for a meeting to all participants"""
+    meeting = await meeting_service.get_meeting(meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    
+    # Send reminders to all participants
+    results = await notification_service.send_bulk_reminders(meeting, hours_before=1)
+    
+    successful_sends = sum(1 for success in results.values() if success)
+    total_participants = len(meeting.participants)
+    
+    return {
+        "message": f"Reminders sent to {successful_sends}/{total_participants} participants",
+        "results": results
+    }
+
+@app.post("/api/meetings/{meeting_id}/send-update")
+async def send_update_notification(meeting_id: str, request: UpdateNotificationRequest):
+    """Send update notification for a meeting to all participants"""
+    meeting = await meeting_service.get_meeting(meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    
+    # Send update notifications to all participants
+    results = {}
+    for participant in meeting.participants:
+        results[participant.email] = await notification_service.send_meeting_update(
+            meeting, participant, request.changes_description
+        )
+    
+    successful_sends = sum(1 for success in results.values() if success)
+    total_participants = len(meeting.participants)
+    
+    return {
+        "message": f"Update notifications sent to {successful_sends}/{total_participants} participants",
+        "results": results
+    }
+
+@app.post("/api/meetings/{meeting_id}/send-cancellation")
+async def send_cancellation_notification(meeting_id: str, request: CancellationNotificationRequest):
+    """Send cancellation notification for a meeting to all participants"""
+    meeting = await meeting_service.get_meeting(meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    
+    # Send cancellation notifications to all participants
+    results = {}
+    for participant in meeting.participants:
+        results[participant.email] = await notification_service.send_meeting_cancellation(
+            meeting, participant, request.cancellation_reason
+        )
+    
+    successful_sends = sum(1 for success in results.values() if success)
+    total_participants = len(meeting.participants)
+    
+    return {
+        "message": f"Cancellation notifications sent to {successful_sends}/{total_participants} participants",
+        "results": results
+    }
 
 @app.post("/api/metadata", response_model=Metadata)
 async def create_metadata(

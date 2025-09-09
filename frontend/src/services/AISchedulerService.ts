@@ -1,5 +1,13 @@
 import { Meeting, Participant, TimeSlot, MeetingFormData } from '../types';
 
+declare global {
+  namespace NodeJS {
+    interface ProcessEnv {
+      REACT_APP_API_URL?: string;
+    }
+  }
+}
+
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
 export class AISchedulerService {
@@ -59,13 +67,17 @@ export class AISchedulerService {
     const [endHour, endMinute] = endTimeStr.split(':').map(Number);
     endTime.setHours(endHour, endMinute, 0, 0);
 
+    // Convert preferred_date to datetime format
+    const [prefYear, prefMonth, prefDay] = formData.preferredDate.split('-').map(Number);
+    const preferredDateTime = new Date(prefYear, prefMonth - 1, prefDay, 0, 0, 0, 0);
+
     const apiData = {
       title: formData.title,
       description: formData.description,
       participants: formData.participants,
       start_time: startTime.toISOString(),
       end_time: endTime.toISOString(),
-      preferred_date: meetingDate.toISOString(),
+      preferred_date: preferredDateTime.toISOString(),
       metadata: {
         preferred_time_slots: formData.preferredTimeSlots?.map(slot => ({
           start: slot.start.toISOString(),
@@ -108,20 +120,57 @@ export class AISchedulerService {
   }
 
   static async sendMeetingInvitation(meeting: Meeting): Promise<void> {
-    // For now, we'll just log this since the backend doesn't have a specific endpoint for this
-    console.log(`Sending meeting invitation to: ${meeting.participants.map(p => p.email).join(', ')}`);
-    
-    // You could implement this by calling a notification service or email service
-    // For example:
-    // await this.makeRequest(`/api/meetings/${meeting.id}/send-invitation`, {
-    //   method: 'POST',
-    // });
+    try {
+      const response = await this.makeRequest(`/api/meetings/${meeting.id}/send-invitation`, {
+        method: 'POST',
+      });
+      
+      console.log('Meeting invitations sent:', response);
+    } catch (error) {
+      console.error('Failed to send meeting invitations:', error);
+      throw error;
+    }
   }
 
   static async sendReminder(meetingId: string): Promise<void> {
-    await this.makeRequest(`/api/meetings/${meetingId}/send-reminder`, {
-      method: 'POST',
-    });
+    try {
+      const response = await this.makeRequest(`/api/meetings/${meetingId}/send-reminder`, {
+        method: 'POST',
+      });
+      
+      console.log('Meeting reminders sent:', response);
+    } catch (error) {
+      console.error('Failed to send meeting reminders:', error);
+      throw error;
+    }
+  }
+
+  static async sendUpdateNotification(meetingId: string, changesDescription: string): Promise<void> {
+    try {
+      const response = await this.makeRequest(`/api/meetings/${meetingId}/send-update`, {
+        method: 'POST',
+        body: JSON.stringify({ changes_description: changesDescription }),
+      });
+      
+      console.log('Meeting update notifications sent:', response);
+    } catch (error) {
+      console.error('Failed to send meeting update notifications:', error);
+      throw error;
+    }
+  }
+
+  static async sendCancellationNotification(meetingId: string, cancellationReason: string): Promise<void> {
+    try {
+      const response = await this.makeRequest(`/api/meetings/${meetingId}/send-cancellation`, {
+        method: 'POST',
+        body: JSON.stringify({ cancellation_reason: cancellationReason }),
+      });
+      
+      console.log('Meeting cancellation notifications sent:', response);
+    } catch (error) {
+      console.error('Failed to send meeting cancellation notifications:', error);
+      throw error;
+    }
   }
 
   static async findCommonFreeTime(
