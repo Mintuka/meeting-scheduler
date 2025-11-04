@@ -19,7 +19,8 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
     register,
     handleSubmit,
     formState: { errors },
-    reset
+    reset,
+    setError
   } = useForm<MeetingFormData>();
 
   const addParticipant = () => {
@@ -56,9 +57,14 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
     const [endHour, endMinute] = endTimeStr.split(':').map(Number);
     endTime.setHours(endHour, endMinute, 0, 0);
     
-    // Validate that end time is after start time
+    // Validate that end time is after start time and at least 5 minutes
     if (endTime <= startTime) {
-      notificationService.error('Invalid Time', 'End time must be after start time');
+      setError('endTime', { type: 'validate', message: 'End time must be after start time' });
+      return;
+    }
+    const diffMs = endTime.getTime() - startTime.getTime();
+    if (diffMs < 5 * 60 * 1000) {
+      setError('endTime', { type: 'validate', message: 'Meeting must be at least 5 minutes long' });
       return;
     }
 
@@ -185,7 +191,7 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
           {errors.endTime && (
             <p className="mt-1 text-sm text-red-600">{errors.endTime.message}</p>
           )}
-          <p className="mt-1 text-xs text-gray-500">End time must be after start time</p>
+          <p className="mt-1 text-xs text-gray-500">End time must be after start time and at least 5 minutes later</p>
         </div>
 
         {/* Participants */}

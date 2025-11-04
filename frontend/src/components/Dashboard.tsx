@@ -4,17 +4,27 @@ import { Meeting } from '../types';
 import { MeetingForm } from './MeetingForm';
 import { MeetingList } from './MeetingList';
 import { Modal } from './Modal';
+import { EditMeetingForm } from './EditMeetingForm';
 import { AISchedulerService } from '../services/AISchedulerService';
 import { notificationService } from '../services/NotificationService';
 
 export const Dashboard: React.FC = () => {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [showForm, setShowForm] = useState(false);
+  const [editMeeting, setEditMeeting] = useState<Meeting | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [currentTime, setCurrentTime] = useState(() => new Date());
 
   useEffect(() => {
     loadMeetings();
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setCurrentTime(new Date());
+    }, 30_000);
+    return () => clearInterval(interval);
   }, []);
 
   const loadMeetings = async () => {
@@ -34,21 +44,22 @@ export const Dashboard: React.FC = () => {
   };
 
   const handleMeetingCreated = (meeting: Meeting) => {
-    setMeetings([meeting, ...meetings]);
+    setMeetings(prev => [meeting, ...prev]);
     setShowForm(false);
     notificationService.meetingCreated(meeting);
   };
 
-  const handleMeetingUpdated = (updatedMeeting: Meeting) => {
-    setMeetings(meetings.map(m => m.id === updatedMeeting.id ? updatedMeeting : m));
-    notificationService.meetingUpdated(updatedMeeting, 'Meeting details have been updated');
+  const handleMeetingUpdated = (updatedMeeting: Meeting, message: string = 'Meeting details have been updated') => {
+    setMeetings(prev => prev.map(m => m.id === updatedMeeting.id ? updatedMeeting : m));
+    setCurrentTime(new Date());
+    notificationService.meetingUpdated(updatedMeeting, message);
   };
 
   const handleMeetingDeleted = async (meetingId: string) => {
     try {
       const meetingToDelete = meetings.find(m => m.id === meetingId);
       await AISchedulerService.deleteMeeting(meetingId);
-      setMeetings(meetings.filter(m => m.id !== meetingId));
+      setMeetings(prev => prev.filter(m => m.id !== meetingId));
       if (meetingToDelete) {
         notificationService.meetingDeleted(meetingToDelete.title);
       }
@@ -60,11 +71,8 @@ export const Dashboard: React.FC = () => {
   };
 
   const totalParticipants = meetings.reduce((total, meeting) => total + meeting.participants.length, 0);
-  const upcomingMeetings = meetings.filter(m => m.startTime > new Date()).length;
-  const runningMeetings = meetings.filter((m: Meeting) => {
-    const now = new Date();
-    return m.startTime <= now && m.endTime > now;
-  }).length;
+  const upcomingMeetings = meetings.filter(m => m.startTime > currentTime).length;
+  const runningMeetings = meetings.filter((m: Meeting) => m.startTime <= currentTime && m.endTime > currentTime).length;
 
   if (isLoading) {
     return (
@@ -88,6 +96,12 @@ export const Dashboard: React.FC = () => {
               <h1 className="text-2xl font-bold text-gray-900">AI Meeting Scheduler</h1>
             </div>
             <div className="flex items-center space-x-4">
+              <button
+                onClick={() => AISchedulerService.connectGoogle()}
+                className="flex items-center px-3 py-2 text-green-700 bg-green-100 hover:bg-green-200 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
+              >
+                Connect Google Calendar
+              </button>
               <button
                 onClick={loadMeetings}
                 className="flex items-center px-3 py-2 text-gray-600 hover:text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-md"
@@ -172,8 +186,12 @@ export const Dashboard: React.FC = () => {
         <div className="space-y-8">
           <MeetingList
             meetings={meetings}
-            onMeetingUpdated={handleMeetingUpdated}
+            onMeetingUpdated={(m, message) => {
+              handleMeetingUpdated(m, message);
+            }}
             onMeetingDeleted={handleMeetingDeleted}
+            onEditMeeting={setEditMeeting}
+            currentTime={currentTime}
           />
         </div>
 
@@ -186,6 +204,24 @@ export const Dashboard: React.FC = () => {
           <MeetingForm onMeetingCreated={handleMeetingCreated} />
         </Modal>
       </div>
+
+      {/* Edit Meeting Modal */}
+      <Modal
+        isOpen={!!editMeeting}
+        onClose={() => setEditMeeting(null)}
+        title={editMeeting ? `Edit: ${editMeeting.title}` : 'Edit Meeting'}
+      >
+        {editMeeting && (
+          <EditMeetingForm
+            meeting={editMeeting}
+            onClose={() => setEditMeeting(null)}
+            onUpdated={(m, message) => {
+              handleMeetingUpdated(m, message);
+              setEditMeeting(null);
+            }}
+          />
+        )}
+      </Modal>
     </div>
   );
 };

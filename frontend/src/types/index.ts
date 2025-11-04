@@ -19,7 +19,7 @@ export interface Meeting {
   startTime: Date;
   endTime: Date;
   duration: number;
-  status: 'scheduled' | 'confirmed' | 'cancelled' | 'rescheduled';
+  status: 'scheduled' | 'confirmed' | 'cancelled' | 'rescheduled' | 'running' | 'completed';
   createdAt: Date;
   updatedAt: Date;
   metadata?: Record<string, any>;

@@ -140,15 +140,10 @@ class NotificationService {
   }
 
   meetingUpdated(meeting: Meeting, changes: string): string {
-    return this.info(
+    // Use success so it auto-dismisses after a short time
+    return this.success(
       'Meeting Updated',
-      `Meeting "${meeting.title}" has been updated: ${changes}`,
-      {
-        label: 'View Changes',
-        onClick: () => {
-          window.location.href = `/meetings/${meeting.id}`;
-        }
-      }
+      `Meeting "${meeting.title}" has been updated: ${changes}`
     );
   }
 

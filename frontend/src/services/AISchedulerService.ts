@@ -39,6 +39,16 @@ export class AISchedulerService {
     return response.json();
   }
 
+  static async getGoogleAuthUrl(): Promise<string> {
+    const { auth_url } = await this.makeRequest<{ auth_url: string }>(`/api/google/auth-url`);
+    return auth_url;
+  }
+
+  static async connectGoogle(): Promise<void> {
+    const url = await this.getGoogleAuthUrl();
+    window.location.href = url;
+  }
+
   static async getMeetings(): Promise<Meeting[]> {
     const meetings = await this.makeRequest<any[]>('/api/meetings');
     return meetings.map(meeting => this.transformMeetingFromAPI(meeting));
@@ -95,15 +105,18 @@ export class AISchedulerService {
     return this.transformMeetingFromAPI(meeting);
   }
 
-  static async updateMeeting(meetingId: string, updateData: Partial<Meeting>): Promise<Meeting> {
-    const apiData = {
+  static async updateMeeting(meetingId: string, updateData: Partial<Meeting>, participantsEmails?: string[]): Promise<Meeting> {
+    const apiData: any = {
       title: updateData.title,
       description: updateData.description,
-      start_time: updateData.startTime?.toISOString(),
-      end_time: updateData.endTime?.toISOString(),
+      start_time: updateData.startTime ? updateData.startTime.toISOString() : undefined,
+      end_time: updateData.endTime ? updateData.endTime.toISOString() : undefined,
       status: updateData.status,
       metadata: updateData.metadata
     };
+    if (participantsEmails) {
+      apiData.participants_emails = participantsEmails;
+    }
 
     const meeting = await this.makeRequest<any>(`/api/meetings/${meetingId}`, {
       method: 'PUT',
@@ -173,6 +186,21 @@ export class AISchedulerService {
     }
   }
 
+  static async generateMeetLink(meetingId: string): Promise<Meeting> {
+    const meeting = await this.makeRequest<any>(`/api/meetings/${meetingId}/generate-meet-link`, {
+      method: 'POST',
+    });
+    return this.transformMeetingFromAPI(meeting);
+  }
+
+  static async addParticipants(meetingId: string, emails: string[]): Promise<Meeting> {
+    const meeting = await this.makeRequest<any>(`/api/meetings/${meetingId}/participants`, {
+      method: 'POST',
+      body: JSON.stringify({ emails }),
+    });
+    return this.transformMeetingFromAPI(meeting);
+  }
+
   static async findCommonFreeTime(
     participants: Participant[],
     duration: number,
@@ -204,13 +232,15 @@ export class AISchedulerService {
   }
 
   static async rescheduleMeeting(meeting: Meeting, newTimeSlot: TimeSlot): Promise<Meeting> {
-    const updateData = {
-      start_time: newTimeSlot.start.toISOString(),
-      end_time: newTimeSlot.end.toISOString(),
-      status: 'rescheduled' as const,
-    };
-
-    const updatedMeeting = await this.updateMeeting(meeting.id, updateData);
+    const updatedMeeting = await this.updateMeeting(
+      meeting.id,
+      {
+        startTime: newTimeSlot.start,
+        endTime: newTimeSlot.end,
+        status: 'rescheduled',
+        metadata: meeting.metadata,
+      }
+    );
     
     // Send new invitation
     await this.sendMeetingInvitation(updatedMeeting);
@@ -220,6 +250,14 @@ export class AISchedulerService {
 
   // Helper method to transform API response to frontend format
   private static transformMeetingFromAPI(apiMeeting: any): Meeting {
+    const parseDate = (value: string | Date | undefined | null): Date => {
+      if (!value) return new Date(NaN);
+      if (value instanceof Date) return value;
+      const hasTimezone = /[zZ]|[+-]\d{2}:?\d{2}$/.test(value);
+      const normalized = hasTimezone ? value : `${value}Z`;
+      return new Date(normalized);
+    };
+
     return {
       id: apiMeeting.id || apiMeeting._id,
       title: apiMeeting.title,
@@ -229,13 +267,13 @@ export class AISchedulerService {
         name: p.name,
         email: p.email,
         availability: p.availability?.map((a: any) => ({
-          start: new Date(a.start),
-          end: new Date(a.end),
+          start: parseDate(a.start),
+          end: parseDate(a.end),
           isAvailable: a.is_available
         })) || []
       })) || [],
-      startTime: new Date(apiMeeting.start_time),
-      endTime: new Date(apiMeeting.end_time),
+      startTime: parseDate(apiMeeting.start_time),
+      endTime: parseDate(apiMeeting.end_time),
       duration: this.calculateDuration(apiMeeting.start_time, apiMeeting.end_time),
       status: apiMeeting.status,
       createdAt: new Date(apiMeeting.created_at),
@@ -246,8 +284,13 @@ export class AISchedulerService {
 
   // Helper method to calculate duration from start and end times
   private static calculateDuration(startTime: string | Date, endTime: string | Date): number {
-    const start = new Date(startTime);
-    const end = new Date(endTime);
+    const parse = (value: string | Date): Date => {
+      if (value instanceof Date) return value;
+      const hasTimezone = /[zZ]|[+-]\d{2}:?\d{2}$/.test(value);
+      return new Date(hasTimezone ? value : `${value}Z`);
+      };
+    const start = parse(startTime);
+    const end = parse(endTime);
     return Math.round((end.getTime() - start.getTime()) / (1000 * 60)); // Duration in minutes
   }
 }
