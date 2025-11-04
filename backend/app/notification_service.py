@@ -70,6 +70,9 @@ class EmailNotificationService:
             <p><strong>Date:</strong> {{ meeting_date }}</p>
             <p><strong>Time:</strong> {{ meeting_time }}</p>
             <p><strong>Duration:</strong> {{ duration }} minutes</p>
+            {% if meeting.metadata and meeting.metadata.meeting_url %}
+            <p><strong>Join Link:</strong> <a class="button" href="{{ meeting.metadata.meeting_url }}">Join Google Meet</a></p>
+            {% endif %}
         </div>
         
         <div class="participants">
@@ -123,6 +126,9 @@ class EmailNotificationService:
             <p><strong>Date:</strong> {{ meeting_date }}</p>
             <p><strong>Time:</strong> {{ meeting_time }}</p>
             <p><strong>Duration:</strong> {{ duration }} minutes</p>
+            {% if meeting.metadata and meeting.metadata.meeting_url %}
+            <p><strong>Join Link:</strong> <a href="{{ meeting.metadata.meeting_url }}">Join Google Meet</a></p>
+            {% endif %}
         </div>
         
         <div class="reminder">
@@ -170,6 +176,9 @@ class EmailNotificationService:
             <p><strong>Date:</strong> {{ meeting_date }}</p>
             <p><strong>Time:</strong> {{ meeting_time }}</p>
             <p><strong>Duration:</strong> {{ duration }} minutes</p>
+            {% if meeting.metadata and meeting.metadata.meeting_url %}
+            <p><strong>Join Link:</strong> <a href="{{ meeting.metadata.meeting_url }}">Join Google Meet</a></p>
+            {% endif %}
         </div>
         
         <div class="changes">
