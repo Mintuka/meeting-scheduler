@@ -1,0 +1,7 @@
+services:
+  backend-dev:
+    environment:
+      - MONGODB_URL=mongodb://admin:password@mongodb-dev:27017/meeting_scheduler?authSource=admin
+      - MONGODB_DATABASE=meeting_scheduler
+    depends_on:
+      - mongodb-dev

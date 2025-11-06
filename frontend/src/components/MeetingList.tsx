@@ -7,16 +7,28 @@ import { notificationService } from '../services/NotificationService';
 
 interface MeetingListProps {
   meetings: Meeting[];
-  onMeetingUpdated: (meeting: Meeting) => void;
+  onMeetingUpdated: (meeting: Meeting, message?: string) => void;
   onMeetingDeleted: (meetingId: string) => void;
+  onEditMeeting?: (meeting: Meeting) => void;
+  currentTime: Date;
 }
 
 export const MeetingList: React.FC<MeetingListProps> = ({
   meetings,
   onMeetingUpdated,
-  onMeetingDeleted
+  onMeetingDeleted,
+  onEditMeeting,
+  currentTime
 }) => {
   const [reschedulingMeeting, setReschedulingMeeting] = useState<string | null>(null);
+
+  const computeStatus = (meeting: Meeting): Meeting['status'] => {
+    if (meeting.status === 'cancelled') return 'cancelled';
+    if (meeting.startTime <= currentTime && meeting.endTime > currentTime) return 'running';
+    if (meeting.endTime <= currentTime) return 'completed';
+    if (meeting.status === 'rescheduled') return 'rescheduled';
+    return meeting.status;
+  };
 
   const handleReschedule = async (meeting: Meeting) => {
     setReschedulingMeeting(meeting.id);
@@ -28,8 +40,7 @@ export const MeetingList: React.FC<MeetingListProps> = ({
       };
       
       const updatedMeeting = await AISchedulerService.rescheduleMeeting(meeting, newTimeSlot);
-      onMeetingUpdated(updatedMeeting);
-      notificationService.meetingUpdated(updatedMeeting, 'Meeting has been rescheduled to tomorrow');
+      onMeetingUpdated(updatedMeeting, 'Meeting has been rescheduled to tomorrow');
     } catch (error) {
       console.error('Error rescheduling meeting:', error);
       notificationService.error('Reschedule Error', 'Failed to reschedule meeting');
@@ -68,6 +79,10 @@ export const MeetingList: React.FC<MeetingListProps> = ({
         return 'bg-red-100 text-red-800';
       case 'rescheduled':
         return 'bg-yellow-100 text-yellow-800';
+      case 'running':
+        return 'bg-purple-100 text-purple-800';
+      case 'completed':
+        return 'bg-gray-200 text-gray-700';
       default:
         return 'bg-gray-100 text-gray-800';
     }
@@ -86,48 +101,52 @@ export const MeetingList: React.FC<MeetingListProps> = ({
   return (
     <div className="space-y-4">
       <h2 className="text-xl font-semibold text-gray-900 mb-4">Scheduled Meetings</h2>
-      {meetings.map((meeting) => (
+      {meetings.map((meeting) => {
+        const effectiveStatus = computeStatus(meeting);
+        const isCompleted = effectiveStatus === 'completed';
+        return (
         <div key={meeting.id} className="bg-white rounded-lg shadow-md p-6 border border-gray-200">
           <div className="flex justify-between items-start mb-4">
             <div>
               <h3 className="text-lg font-semibold text-gray-900 mb-1">{meeting.title}</h3>
               <p className="text-gray-600 text-sm mb-2">{meeting.description}</p>
-              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getStatusColor(meeting.status)}`}>
-                {meeting.status.charAt(0).toUpperCase() + meeting.status.slice(1)}
+              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getStatusColor(effectiveStatus)}`}>
+                {effectiveStatus.charAt(0).toUpperCase() + effectiveStatus.slice(1)}
               </span>
             </div>
             <div className="flex space-x-2">
-              <button
-                onClick={() => handleSendInvitation(meeting)}
-                className="p-2 text-green-600 hover:bg-green-50 rounded-md"
-                title="Send Invitation"
-              >
+              <button onClick={() => handleSendInvitation(meeting)} className="p-2 text-green-600 hover:bg-green-50 rounded-md" title="Send Invitation">
                 <Mail className="h-4 w-4" />
               </button>
-              <button
-                onClick={() => handleSendReminder(meeting)}
-                className="p-2 text-blue-600 hover:bg-blue-50 rounded-md"
-                title="Send Reminder"
-              >
+              <button onClick={() => handleSendReminder(meeting)} className="p-2 text-blue-600 hover:bg-blue-50 rounded-md" title="Send Reminder">
                 <Bell className="h-4 w-4" />
               </button>
-              <button
-                onClick={() => handleReschedule(meeting)}
-                disabled={reschedulingMeeting === meeting.id}
-                className="p-2 text-blue-600 hover:bg-blue-50 rounded-md disabled:opacity-50"
-                title="Reschedule"
-              >
+              <button onClick={() => handleReschedule(meeting)} disabled={reschedulingMeeting === meeting.id} className="p-2 text-blue-600 hover:bg-blue-50 rounded-md disabled:opacity-50" title="Reschedule">
                 {reschedulingMeeting === meeting.id ? (
                   <RefreshCw className="h-4 w-4 animate-spin" />
                 ) : (
-                  <Edit className="h-4 w-4" />
+                  <RefreshCw className="h-4 w-4" />
                 )}
               </button>
-              <button
-                onClick={() => onMeetingDeleted(meeting.id)}
-                className="p-2 text-red-600 hover:bg-red-50 rounded-md"
-                title="Delete"
-              >
+              <div className="relative group">
+                <button
+                  onClick={() => {
+                    if (isCompleted || !onEditMeeting) return;
+                    onEditMeeting(meeting);
+                  }}
+                  disabled={isCompleted}
+                  className={`p-2 text-gray-700 rounded-md ${isCompleted ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-100'}`}
+                  title={isCompleted ? 'Completed meetings cannot be edited' : 'Edit Meeting'}
+                >
+                  <Edit className="h-4 w-4" />
+                </button>
+                {isCompleted && (
+                  <div className="absolute -top-10 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-800 text-white text-xs px-2 py-1 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none shadow-lg">
+                    Completed meetings can’t be edited
+                  </div>
+                )}
+              </div>
+              <button onClick={() => onMeetingDeleted(meeting.id)} className="p-2 text-red-600 hover:bg-red-50 rounded-md" title="Delete Meeting">
                 <Trash2 className="h-4 w-4" />
               </button>
             </div>
@@ -150,6 +169,20 @@ export const MeetingList: React.FC<MeetingListProps> = ({
             </div>
           </div>
 
+          {meeting.metadata && meeting.metadata.meeting_url && (
+            <div className="mb-4">
+              <a
+                href={meeting.metadata.meeting_url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-block px-3 py-2 bg-green-600 text-white rounded-md hover:bg-green-700"
+                title="Open Google Meet"
+              >
+                Join Google Meet
+              </a>
+            </div>
+          )}
+
           <div className="border-t border-gray-200 pt-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center text-sm text-gray-600">
@@ -169,7 +202,8 @@ export const MeetingList: React.FC<MeetingListProps> = ({
             </div>
           </div>
         </div>
-      ))}
+      );
+      })}
     </div>
   );
 };

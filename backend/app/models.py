@@ -63,6 +63,8 @@ class MeetingUpdate(BaseModel):
     end_time: Optional[datetime] = None
     status: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    # Optional: replace participants list with these email addresses
+    participants_emails: Optional[List[str]] = None
 
 class Metadata(MongoModel):
     key: str
