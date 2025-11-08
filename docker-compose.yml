@@ -1,27 +1,6 @@
 services:
-  # MongoDB Database
-  mongodb:
-    image: mongo:7.0
-    ports:
-      - "27017:27017"
-    environment:
-      - MONGO_INITDB_ROOT_USERNAME=admin
-      - MONGO_INITDB_ROOT_PASSWORD=password
-      - MONGO_INITDB_DATABASE=meeting_scheduler
-    command: mongod --quiet
-    volumes:
-      - mongodb_data:/data/db
-    networks:
-      - app-network
-    restart: unless-stopped
-    logging:
-      driver: "none"
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+  # Note: Using MongoDB Atlas cloud database from docker.env
+  # Local MongoDB service removed - using MONGODB_URL from docker.env instead
 
   # Frontend React Application
   frontend:
@@ -53,11 +32,7 @@ services:
       - NODE_ENV=production
       - PORT=8000
       - FRONTEND_URL=http://localhost:3000
-      - MONGODB_URL=mongodb://admin:password@mongodb:27017
-      - MONGODB_DATABASE=meeting_scheduler
-      - SMTP_SERVER=smtp.gmail.com
-      - SMTP_PORT=587
-      - APP_NAME=Meeting Scheduler
+      # MONGODB_URL and MONGODB_DATABASE are loaded from docker.env
     networks:
       - app-network
     restart: unless-stopped
@@ -67,9 +42,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
-
-volumes:
-  mongodb_data:
 
 networks:
   app-network:

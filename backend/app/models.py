@@ -80,3 +80,61 @@ class User(MongoModel):
     preferences: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+class Event(MongoModel):
+    title: str
+    description: Optional[str] = None
+    start_time: datetime
+    end_time: datetime
+    location: Optional[str] = None
+    category: Optional[str] = None
+    status: str = "scheduled"
+    creator_email: str  # Email of the user who created the event
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+class EventCreate(BaseModel):
+    title: str
+    description: Optional[str] = None
+    start_time: datetime
+    end_time: datetime
+    location: Optional[str] = None
+    category: Optional[str] = None
+    creator_email: Optional[str] = None  # Will be set from authenticated user
+    metadata: Optional[Dict[str, Any]] = None
+
+class EventUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    location: Optional[str] = None
+    category: Optional[str] = None
+    status: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+# Poll Models
+class PollOption(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    text: str
+    votes: List[str] = Field(default_factory=list)  # List of voter emails
+
+class Poll(MongoModel):
+    meeting_id: str  # Reference to meeting
+    question: str
+    options: List[PollOption]
+    creator_email: str  # Email of the meeting creator who created the poll
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    is_closed: bool = False  # Whether voting is closed
+
+class PollCreate(BaseModel):
+    meeting_id: str
+    question: str
+    options: List[str]  # List of option texts
+
+class PollVote(BaseModel):
+    poll_id: str
+    option_id: str
+    voter_email: str

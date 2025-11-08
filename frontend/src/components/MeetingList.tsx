@@ -1,9 +1,12 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { format } from 'date-fns';
-import { Calendar, Clock, Users, Mail, Edit, Trash2, RefreshCw, Bell } from 'lucide-react';
-import { Meeting } from '../types';
+import { Calendar, Clock, Users, Mail, Edit, Trash2, Bell, BarChart3, Plus, X } from 'lucide-react';
+import { Meeting, Poll, PollCreate } from '../types';
 import { AISchedulerService } from '../services/AISchedulerService';
 import { notificationService } from '../services/NotificationService';
+import { PollForm } from './PollForm';
+import { PollDisplay } from './PollDisplay';
+import { authService } from '../services/AuthService';
 
 interface MeetingListProps {
   meetings: Meeting[];
@@ -20,7 +23,51 @@ export const MeetingList: React.FC<MeetingListProps> = ({
   onEditMeeting,
   currentTime
 }) => {
-  const [reschedulingMeeting, setReschedulingMeeting] = useState<string | null>(null);
+  const [polls, setPolls] = useState<Record<string, Poll[]>>({});
+  const [showPollForm, setShowPollForm] = useState<Record<string, boolean>>({});
+  const [loadingPolls, setLoadingPolls] = useState<Record<string, boolean>>({});
+
+  const currentUser = authService.getUser();
+  const userEmail = currentUser?.email;
+
+  // Check if user is a participant (can vote)
+  const isParticipant = (meeting: Meeting) => {
+    if (!userEmail) return false;
+    return meeting.participants.some(p => p.email === userEmail);
+  };
+
+  // Check if user is meeting creator (first participant, can create polls)
+  const isMeetingCreator = (meeting: Meeting) => {
+    if (!userEmail || meeting.participants.length === 0) return false;
+    return meeting.participants[0].email === userEmail;
+  };
+
+  const loadPolls = async (meetingId: string) => {
+    if (loadingPolls[meetingId]) return;
+    
+    setLoadingPolls(prev => ({ ...prev, [meetingId]: true }));
+    try {
+      const meetingPolls = await AISchedulerService.getMeetingPolls(meetingId);
+      setPolls(prev => ({ ...prev, [meetingId]: meetingPolls }));
+    } catch (error) {
+      console.error('Error loading polls:', error);
+    } finally {
+      setLoadingPolls(prev => ({ ...prev, [meetingId]: false }));
+    }
+  };
+
+  // Auto-load polls for meetings where user is a participant (only once per meeting)
+  useEffect(() => {
+    if (!userEmail) return;
+    
+    meetings.forEach(meeting => {
+      const isUserParticipant = meeting.participants.some(p => p.email === userEmail);
+      if (isUserParticipant && !polls[meeting.id] && !loadingPolls[meeting.id] && !showPollForm[meeting.id]) {
+        loadPolls(meeting.id);
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meetings.length, userEmail]); // Load when meetings list changes or user changes
 
   const computeStatus = (meeting: Meeting): Meeting['status'] => {
     if (meeting.status === 'cancelled') return 'cancelled';
@@ -30,42 +77,87 @@ export const MeetingList: React.FC<MeetingListProps> = ({
     return meeting.status;
   };
 
-  const handleReschedule = async (meeting: Meeting) => {
-    setReschedulingMeeting(meeting.id);
-    try {
-      const newTimeSlot = {
-        start: new Date(meeting.startTime.getTime() + 24 * 60 * 60 * 1000),
-        end: new Date(meeting.endTime.getTime() + 24 * 60 * 60 * 1000),
-        isAvailable: true
-      };
-      
-      const updatedMeeting = await AISchedulerService.rescheduleMeeting(meeting, newTimeSlot);
-      onMeetingUpdated(updatedMeeting, 'Meeting has been rescheduled to tomorrow');
-    } catch (error) {
-      console.error('Error rescheduling meeting:', error);
-      notificationService.error('Reschedule Error', 'Failed to reschedule meeting');
-    } finally {
-      setReschedulingMeeting(null);
-    }
-  };
-
   const handleSendReminder = async (meeting: Meeting) => {
     try {
       await AISchedulerService.sendReminder(meeting.id);
       notificationService.meetingReminderSent(meeting);
     } catch (error) {
       console.error('Error sending reminder:', error);
-      notificationService.error('Reminder Error', 'Failed to send reminder');
+      notificationService.error('Reminder Error', 'Failed to send reminder. Please try again.');
     }
   };
 
-  const handleSendInvitation = async (meeting: Meeting) => {
+  const handleCreatePoll = async (meetingId: string, pollData: PollCreate) => {
     try {
-      await AISchedulerService.sendMeetingInvitation(meeting);
-      notificationService.meetingInvitationSent(meeting);
+      const poll = await AISchedulerService.createPoll(meetingId, pollData);
+      setPolls(prev => ({
+        ...prev,
+        [meetingId]: [...(prev[meetingId] || []), poll]
+      }));
+      setShowPollForm(prev => ({ ...prev, [meetingId]: false }));
+      notificationService.success('Poll Created', 'Poll has been created successfully.');
     } catch (error) {
-      console.error('Error sending invitation:', error);
-      notificationService.failedToSendInvitations(meeting, 'Failed to send invitations');
+      console.error('Error creating poll:', error);
+      notificationService.error('Poll Error', 'Failed to create poll. Please try again.');
+    }
+  };
+
+  const handleVote = async (pollId: string, optionId: string) => {
+    try {
+      const updatedPoll = await AISchedulerService.voteOnPoll(pollId, optionId);
+      // Find which meeting this poll belongs to
+      const meetingId = Object.keys(polls).find(id =>
+        polls[id].some(p => p.id === pollId)
+      );
+      if (meetingId) {
+        setPolls(prev => ({
+          ...prev,
+          [meetingId]: prev[meetingId].map(p => p.id === pollId ? updatedPoll : p)
+        }));
+      }
+    } catch (error) {
+      console.error('Error voting on poll:', error);
+      notificationService.error('Vote Error', 'Failed to vote. Please try again.');
+    }
+  };
+
+  const handleClosePoll = async (pollId: string) => {
+    try {
+      const updatedPoll = await AISchedulerService.closePoll(pollId);
+      const meetingId = Object.keys(polls).find(id =>
+        polls[id].some(p => p.id === pollId)
+      );
+      if (meetingId) {
+        setPolls(prev => ({
+          ...prev,
+          [meetingId]: prev[meetingId].map(p => p.id === pollId ? updatedPoll : p)
+        }));
+      }
+      notificationService.success('Poll Closed', 'Poll has been closed.');
+    } catch (error) {
+      console.error('Error closing poll:', error);
+      notificationService.error('Poll Error', 'Failed to close poll. Please try again.');
+    }
+  };
+
+  const handleDeletePoll = async (pollId: string) => {
+    if (!window.confirm('Are you sure you want to delete this poll?')) return;
+    
+    try {
+      await AISchedulerService.deletePoll(pollId);
+      const meetingId = Object.keys(polls).find(id =>
+        polls[id].some(p => p.id === pollId)
+      );
+      if (meetingId) {
+        setPolls(prev => ({
+          ...prev,
+          [meetingId]: prev[meetingId].filter(p => p.id !== pollId)
+        }));
+      }
+      notificationService.info('Poll Deleted', 'Poll has been deleted.');
+    } catch (error) {
+      console.error('Error deleting poll:', error);
+      notificationService.error('Poll Error', 'Failed to delete poll. Please try again.');
     }
   };
 
@@ -115,22 +207,22 @@ export const MeetingList: React.FC<MeetingListProps> = ({
               </span>
             </div>
             <div className="flex space-x-2">
-              <button onClick={() => handleSendInvitation(meeting)} className="p-2 text-green-600 hover:bg-green-50 rounded-md" title="Send Invitation">
-                <Mail className="h-4 w-4" />
-              </button>
-              <button onClick={() => handleSendReminder(meeting)} className="p-2 text-blue-600 hover:bg-blue-50 rounded-md" title="Send Reminder">
+              <button 
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handleSendReminder(meeting);
+                }} 
+                className="p-2 text-blue-600 hover:bg-blue-50 rounded-md" 
+                title="Send Reminder"
+              >
                 <Bell className="h-4 w-4" />
-              </button>
-              <button onClick={() => handleReschedule(meeting)} disabled={reschedulingMeeting === meeting.id} className="p-2 text-blue-600 hover:bg-blue-50 rounded-md disabled:opacity-50" title="Reschedule">
-                {reschedulingMeeting === meeting.id ? (
-                  <RefreshCw className="h-4 w-4 animate-spin" />
-                ) : (
-                  <RefreshCw className="h-4 w-4" />
-                )}
               </button>
               <div className="relative group">
                 <button
-                  onClick={() => {
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
                     if (isCompleted || !onEditMeeting) return;
                     onEditMeeting(meeting);
                   }}
@@ -142,11 +234,21 @@ export const MeetingList: React.FC<MeetingListProps> = ({
                 </button>
                 {isCompleted && (
                   <div className="absolute -top-10 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-800 text-white text-xs px-2 py-1 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none shadow-lg">
-                    Completed meetings can’t be edited
+                    Completed meetings can't be edited
                   </div>
                 )}
               </div>
-              <button onClick={() => onMeetingDeleted(meeting.id)} className="p-2 text-red-600 hover:bg-red-50 rounded-md" title="Delete Meeting">
+              <button 
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (window.confirm(`Are you sure you want to delete "${meeting.title}"?`)) {
+                    onMeetingDeleted(meeting.id);
+                  }
+                }} 
+                className="p-2 text-red-600 hover:bg-red-50 rounded-md" 
+                title="Delete Meeting"
+              >
                 <Trash2 className="h-4 w-4" />
               </button>
             </div>
@@ -183,7 +285,86 @@ export const MeetingList: React.FC<MeetingListProps> = ({
             </div>
           )}
 
-          <div className="border-t border-gray-200 pt-4">
+          {/* Polls Section */}
+          <div className="border-t border-gray-200 pt-4 mt-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center text-sm font-medium text-gray-700">
+                <BarChart3 className="h-4 w-4 mr-2" />
+                <span>Polls</span>
+                {polls[meeting.id] && polls[meeting.id].length > 0 && (
+                  <span className="ml-2 px-2 py-0.5 bg-blue-100 text-blue-800 rounded-full text-xs">
+                    {polls[meeting.id].length}
+                  </span>
+                )}
+              </div>
+              {isMeetingCreator(meeting) && (
+                <button
+                  onClick={() => {
+                    setShowPollForm(prev => ({ ...prev, [meeting.id]: !prev[meeting.id] }));
+                    if (!polls[meeting.id] && !loadingPolls[meeting.id]) {
+                      loadPolls(meeting.id);
+                    }
+                  }}
+                  className="flex items-center text-sm text-blue-600 hover:text-blue-700"
+                >
+                  {showPollForm[meeting.id] ? (
+                    <>
+                      <X className="h-4 w-4 mr-1" />
+                      Cancel
+                    </>
+                  ) : (
+                    <>
+                      <Plus className="h-4 w-4 mr-1" />
+                      Create Poll
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
+
+            {/* Poll Form */}
+            {showPollForm[meeting.id] && (
+              <div className="mb-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
+                <PollForm
+                  meetingId={meeting.id}
+                  onSubmit={(pollData) => handleCreatePoll(meeting.id, pollData)}
+                  onCancel={() => setShowPollForm(prev => ({ ...prev, [meeting.id]: false }))}
+                />
+              </div>
+            )}
+
+            {/* Load Polls Button - Show for all participants */}
+            {!polls[meeting.id] && !showPollForm[meeting.id] && isParticipant(meeting) && (
+              <button
+                onClick={() => loadPolls(meeting.id)}
+                className="text-sm text-blue-600 hover:text-blue-700 mb-3"
+              >
+                {loadingPolls[meeting.id] ? 'Loading polls...' : 'View Polls'}
+              </button>
+            )}
+
+
+            {/* Display Polls */}
+            {polls[meeting.id] && polls[meeting.id].length > 0 && (
+              <div className="space-y-3">
+                {polls[meeting.id].map((poll) => (
+                  <PollDisplay
+                    key={poll.id}
+                    poll={poll}
+                    onVote={handleVote}
+                    onClose={poll.creatorEmail === userEmail ? handleClosePoll : undefined}
+                    onDelete={poll.creatorEmail === userEmail ? handleDeletePoll : undefined}
+                  />
+                ))}
+              </div>
+            )}
+
+            {polls[meeting.id] && polls[meeting.id].length === 0 && !showPollForm[meeting.id] && (
+              <p className="text-sm text-gray-500">No polls yet. Create one to get started!</p>
+            )}
+          </div>
+
+          <div className="border-t border-gray-200 pt-4 mt-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center text-sm text-gray-600">
                 <Mail className="h-4 w-4 mr-2" />
