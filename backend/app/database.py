@@ -55,3 +55,7 @@ def get_users_collection():
 def get_metadata_collection():
     """Get the metadata collection."""
     return MongoDB.get_collection("metadata")
+
+
+def get_polls_collection():
+    return MongoDB.get_collection("polls")

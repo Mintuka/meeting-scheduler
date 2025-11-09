@@ -2,11 +2,13 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorCollection
+from pymongo import ReturnDocument
 import uuid
-from .database import get_meetings_collection, get_metadata_collection, get_users_collection
+from .database import get_meetings_collection, get_metadata_collection, get_users_collection, get_polls_collection
 from .meet_link import generate_google_meet_link
 from .google_calendar import create_event_with_meet
-from .models import Meeting, MeetingCreate, MeetingUpdate, Metadata, User
+from .models import Meeting, MeetingCreate, MeetingUpdate, Metadata, User, Poll, PollOption, PollVote
+from .rooms_catalog import ROOMS_CATALOG, get_room_by_id
 
 class MeetingService:
     def __init__(self):
@@ -31,6 +33,8 @@ class MeetingService:
     def _determine_status(self, meeting: Meeting) -> str:
         if meeting.status == "cancelled":
             return "cancelled"
+        if meeting.status == "polling":
+            return "polling"
 
         now = datetime.utcnow()
         if meeting.start_time <= now < meeting.end_time:
@@ -44,7 +48,12 @@ class MeetingService:
 
         return "scheduled"
 
-    async def create_meeting(self, meeting_data: MeetingCreate, metadata: Optional[Dict[str, Any]] = None) -> Meeting:
+    async def create_meeting(
+        self,
+        meeting_data: MeetingCreate,
+        metadata: Optional[Dict[str, Any]] = None,
+        organizer_email: Optional[str] = None,
+    ) -> Meeting:
         """Create a new meeting with metadata"""
         from datetime import timedelta
         
@@ -64,8 +73,30 @@ class MeetingService:
         
         # Prepare metadata and mark this as online by default unless specified
         meta: Dict[str, Any] = dict(metadata or {})
-        meta.setdefault("location_type", "online")
+        location_type = meta.get("location_type", "online")
 
+        if location_type == "onsite":
+            room_id = meta.get("room_id")
+            await self._ensure_room_available(room_id, meeting_data.start_time, meeting_data.end_time)
+            room = get_room_by_id(room_id)
+            if room:
+                meta.update(
+                    {
+                        "room_name": room["name"],
+                        "room_capacity": room["capacity"],
+                        "room_location": room["location"],
+                        "room_features": room.get("features", []),
+                        "room_notes": room.get("notes"),
+                    }
+                )
+        else:
+            # Clean up any stray onsite properties when forcing online meetings
+            for key in ("room_id", "room_name", "room_capacity", "room_location", "room_features", "room_notes"):
+                meta.pop(key, None)
+
+        meta["location_type"] = location_type
+
+        status = "polling" if meta.get("poll_pending") else "scheduled"
         meeting_doc = {
             "title": meeting_data.title,
             "description": meeting_data.description,
@@ -73,7 +104,8 @@ class MeetingService:
             "start_time": meeting_data.start_time,
             "end_time": meeting_data.end_time,
             "duration": duration,
-            "status": "scheduled",
+            "status": status,
+            "organizer_email": organizer_email,
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow(),
             "metadata": meta
@@ -94,10 +126,19 @@ class MeetingService:
         except Exception:
             return None
 
-    async def get_all_meetings(self) -> List[Meeting]:
-        """Get all meetings"""
-        meetings = []
-        cursor = self.collection.find({})
+    async def get_all_meetings(self, user_email: Optional[str] = None) -> List[Meeting]:
+        """Get all meetings the user organizes or participates in."""
+        query: Dict[str, Any] = {}
+        if user_email:
+            query = {
+                "$or": [
+                    {"organizer_email": user_email},
+                    {"participants.email": user_email},
+                ]
+            }
+
+        meetings: List[Meeting] = []
+        cursor = self.collection.find(query)
         async for meeting_doc in cursor:
             meeting = Meeting(**meeting_doc)
             meetings.append(await self._sync_meeting_status(meeting))
@@ -106,10 +147,14 @@ class MeetingService:
     async def update_meeting(self, meeting_id: str, update_data: MeetingUpdate) -> Optional[Meeting]:
         """Update a meeting"""
         try:
+            existing_doc = await self.collection.find_one({"_id": ObjectId(meeting_id)})
+            if not existing_doc:
+                return None
+            existing = Meeting(**existing_doc)
+
             update_dict = update_data.model_dump(exclude_unset=True)
             participants_emails = update_dict.pop("participants_emails", None)
             if participants_emails is not None:
-                # Rebuild participants array from the provided emails
                 update_dict["participants"] = [
                     {
                         "id": str(uuid.uuid4()),
@@ -119,17 +164,43 @@ class MeetingService:
                     }
                     for email in participants_emails
                 ]
-            # Recalculate duration if start or end time is being changed
+
+            start = update_dict.get("start_time", existing.start_time)
+            end = update_dict.get("end_time", existing.end_time)
             if "start_time" in update_dict or "end_time" in update_dict:
-                existing = await self.collection.find_one({"_id": ObjectId(meeting_id)})
-                if not existing:
-                    return None
-                start = update_dict.get("start_time", existing.get("start_time"))
-                end = update_dict.get("end_time", existing.get("end_time"))
-                # Compute minutes duration (int)
                 duration = int((end - start).total_seconds() / 60)
                 update_dict["duration"] = duration
 
+            # Merge metadata (existing + incoming)
+            existing_meta = dict(existing.metadata or {})
+            incoming_meta = update_dict.get("metadata")
+            if incoming_meta is not None:
+                merged_meta = {**existing_meta, **incoming_meta}
+            else:
+                merged_meta = dict(existing_meta)
+
+            location_type = merged_meta.get("location_type", existing_meta.get("location_type", "online"))
+            if location_type == "onsite":
+                room_id = merged_meta.get("room_id") or existing_meta.get("room_id")
+                await self._ensure_room_available(room_id, start, end, exclude_meeting_id=meeting_id)
+                room = get_room_by_id(room_id) if room_id else None
+                if room:
+                    merged_meta.update(
+                        {
+                            "room_id": room_id,
+                            "room_name": room["name"],
+                            "room_capacity": room["capacity"],
+                            "room_location": room["location"],
+                            "room_features": room.get("features", []),
+                            "room_notes": room.get("notes"),
+                        }
+                    )
+            else:
+                for key in ("room_id", "room_name", "room_capacity", "room_location", "room_features", "room_notes"):
+                    merged_meta.pop(key, None)
+
+            merged_meta["location_type"] = location_type
+            update_dict["metadata"] = merged_meta
             update_dict["updated_at"] = datetime.utcnow()
             
             result = await self.collection.update_one(
@@ -140,6 +211,8 @@ class MeetingService:
             if result.modified_count > 0:
                 return await self.get_meeting(meeting_id)
             return None
+        except ValueError:
+            raise
         except Exception:
             return None
 
@@ -212,6 +285,69 @@ class MeetingService:
         meta["meeting_platform"] = "google_meet"
         meta["meeting_url"] = meta.get("meeting_url") or generate_google_meet_link()
         return await self.update_meeting_metadata(meeting_id, meta)
+
+    async def find_room_conflicts(
+        self,
+        room_id: str,
+        start_time: datetime,
+        end_time: datetime,
+        exclude_meeting_id: Optional[str] = None,
+    ) -> List[Meeting]:
+        query: Dict[str, Any] = {
+            "metadata.room_id": room_id,
+            "start_time": {"$lt": end_time},
+            "end_time": {"$gt": start_time},
+        }
+        if exclude_meeting_id:
+            query["_id"] = {"$ne": ObjectId(exclude_meeting_id)}
+        conflicts: List[Meeting] = []
+        cursor = self.collection.find(query)
+        async for doc in cursor:
+            conflicts.append(Meeting(**doc))
+        return conflicts
+
+    async def _ensure_room_available(
+        self,
+        room_id: Optional[str],
+        start_time: datetime,
+        end_time: datetime,
+        exclude_meeting_id: Optional[str] = None,
+    ) -> None:
+        if not room_id:
+            raise ValueError("Select a room for onsite meetings.")
+        conflicts = await self.find_room_conflicts(room_id, start_time, end_time, exclude_meeting_id)
+        if conflicts:
+            room = get_room_by_id(room_id)
+            room_name = room["name"] if room else "Selected room"
+            conflicting = conflicts[0]
+            readable = conflicting.start_time.strftime("%b %d %I:%M %p")
+            raise ValueError(f"{room_name} is already reserved ({readable}). Choose another room or time.")
+
+    async def get_rooms_availability(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        exclude_meeting_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        availability: List[Dict[str, Any]] = []
+        for room in ROOMS_CATALOG:
+            conflicts = await self.find_room_conflicts(room["id"], start_time, end_time, exclude_meeting_id)
+            availability.append(
+                {
+                    **room,
+                    "is_available": len(conflicts) == 0,
+                    "conflicts": [
+                        {
+                            "meeting_id": str(conflict.id),
+                            "title": conflict.title,
+                            "start_time": conflict.start_time.isoformat(),
+                            "end_time": conflict.end_time.isoformat(),
+                        }
+                        for conflict in conflicts
+                    ],
+                }
+            )
+        return availability
 
 class MetadataService:
     def __init__(self):
@@ -307,6 +443,48 @@ class UserService:
         except Exception:
             return None
 
+    async def get_user_by_google_sub(self, google_sub: str) -> Optional[User]:
+        try:
+            user_doc = await self.collection.find_one({"google_sub": google_sub})
+            if user_doc:
+                return User(**user_doc)
+            return None
+        except Exception:
+            return None
+
+    async def upsert_google_user(
+        self,
+        *,
+        email: str,
+        name: str,
+        google_sub: str,
+        picture: Optional[str],
+        credentials: Optional[Dict[str, Any]] = None,
+    ) -> User:
+        now = datetime.utcnow()
+        update_doc: Dict[str, Any] = {
+            "email": email,
+            "name": name,
+            "google_sub": google_sub,
+            "picture": picture,
+            "last_login_at": now,
+            "updated_at": now,
+        }
+        if credentials:
+            update_doc["preferences.google_credentials"] = credentials
+
+        result = await self.collection.find_one_and_update(
+            {"google_sub": google_sub},
+            {"$set": update_doc,
+             "$setOnInsert": {"created_at": now}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER
+        )
+        if result:
+            return User(**result)
+        # fallback fetch
+        return await self.get_user_by_google_sub(google_sub)
+
     async def update_user_preferences(self, email: str, preferences: Dict[str, Any]) -> Optional[User]:
         """Update user preferences"""
         try:
@@ -325,3 +503,89 @@ class UserService:
             return None
         except Exception:
             return None
+
+
+class PollService:
+    def __init__(self):
+        self.collection: AsyncIOMotorCollection = get_polls_collection()
+
+    async def create_poll(
+        self,
+        meeting_id: str,
+        organizer_email: str,
+        options: List[Dict[str, Any]],
+        deadline: Optional[datetime] = None,
+    ) -> Poll:
+        poll_doc = {
+            "meeting_id": meeting_id,
+            "organizer_email": organizer_email,
+            "options": [PollOption(**opt).model_dump() for opt in options],
+            "votes": [],
+            "status": "open",
+            "deadline": deadline,
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+        }
+        result = await self.collection.insert_one(poll_doc)
+        poll_doc["_id"] = result.inserted_id
+        return Poll(**poll_doc)
+
+    async def get_poll(self, poll_id: str) -> Optional[Poll]:
+        try:
+            poll_doc = await self.collection.find_one({"_id": ObjectId(poll_id)})
+            if poll_doc:
+                return Poll(**poll_doc)
+            return None
+        except Exception:
+            return None
+
+    async def add_vote(self, poll_id: str, option_id: str, voter_email: str) -> Optional[Poll]:
+        poll = await self.get_poll(poll_id)
+        if not poll:
+            return None
+        if poll.status != "open":
+            raise ValueError("Poll is closed")
+
+        # Remove any existing vote from this voter
+        poll.votes = [vote for vote in poll.votes if vote.voter_email.lower() != voter_email.lower()]
+        poll.votes.append(PollVote(option_id=option_id, voter_email=voter_email))
+
+        # Update vote counts
+        vote_counts: Dict[str, int] = {}
+        for vote in poll.votes:
+            vote_counts[vote.option_id] = vote_counts.get(vote.option_id, 0) + 1
+        for option in poll.options:
+            option.votes = vote_counts.get(option.id, 0)
+
+        poll.updated_at = datetime.utcnow()
+        await self.collection.update_one(
+            {"_id": poll.id},
+            {"$set": poll.model_dump()}
+        )
+        return poll
+
+    async def finalize_poll(self, poll_id: str, option_id: Optional[str] = None) -> Optional[Poll]:
+        poll = await self.get_poll(poll_id)
+        if not poll:
+            return None
+        if poll.status == "closed":
+            return poll
+
+        if option_id is None:
+            # Pick option with most votes, tie -> earliest start time
+            sorted_options = sorted(
+                poll.options,
+                key=lambda opt: (-opt.votes, opt.start_time)
+            )
+            if not sorted_options:
+                raise ValueError("No options to finalize")
+            option_id = sorted_options[0].id
+
+        poll.status = "closed"
+        poll.winning_option_id = option_id
+        poll.updated_at = datetime.utcnow()
+        await self.collection.update_one(
+            {"_id": poll.id},
+            {"$set": poll.model_dump()}
+        )
+        return poll

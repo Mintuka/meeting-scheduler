@@ -1,28 +1,172 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.responses import RedirectResponse
 from contextlib import asynccontextmanager
 import uvicorn
 from datetime import datetime
 import os
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Annotated
 from pydantic import BaseModel, Field
 import uuid
 
 from app.database import MongoDB
-from app.models import Meeting, MeetingCreate, MeetingUpdate, Metadata
-from app.services import MeetingService, MetadataService, UserService
+from app.models import Meeting, MeetingCreate, MeetingUpdate, Metadata, Room, RoomAvailability, User, Poll
+from app.services import MeetingService, MetadataService, UserService, PollService
 from app.google_calendar import (
     generate_auth_url,
     exchange_code_for_tokens,
     create_event_with_meet,
+    create_calendar_event,
     update_event_attendees,
     update_event,
 )
 import anyio
 from app.notification_service import notification_service
 from app.email_reply_listener import EmailReplyListener
+from app.auth import create_access_token, get_current_user_token
+from google.oauth2 import id_token as google_id_token
+from google.auth.transport import requests as google_requests
+from app.calendar_service import list_events as calendar_list_events, get_free_busy
+from app.rooms_catalog import ROOMS_CATALOG
+from dateutil import parser as date_parser
+from datetime import timezone, timedelta
+from zoneinfo import ZoneInfo
+
+
+def _ensure_tz(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _parse_busy_entry(entry: Dict[str, str]) -> tuple[datetime, datetime]:
+    start = _ensure_tz(date_parser.isoparse(entry["start"]))
+    end = _ensure_tz(date_parser.isoparse(entry["end"]))
+    return start, end
+
+
+def _merge_intervals(intervals: List[tuple[datetime, datetime]]) -> List[tuple[datetime, datetime]]:
+    if not intervals:
+        return []
+    intervals = sorted(intervals, key=lambda x: x[0])
+    merged = [list(intervals[0])]
+    for start, end in intervals[1:]:
+        if start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(start, end) for start, end in merged]
+
+
+MAX_SUGGESTION_POOL = 96  # cover 48 half-hour slots across a day
+
+
+def _generate_suggestions(
+    busy_intervals: List[tuple[datetime, datetime]],
+    window_start: datetime,
+    window_end: datetime,
+    duration: timedelta,
+    increment: timedelta,
+    max_suggestions: int,
+) -> List[Dict[str, datetime]]:
+    suggestions: List[Dict[str, datetime]] = []
+    cursor = window_start
+    for start, end in busy_intervals:
+        if cursor < start:
+            slot_start = cursor
+            while slot_start + duration <= min(start, window_end):
+                suggestions.append({"start": slot_start, "end": slot_start + duration})
+                if len(suggestions) >= MAX_SUGGESTION_POOL:
+                    return suggestions
+                slot_start += increment
+        cursor = max(cursor, end)
+        if cursor >= window_end:
+            break
+    while cursor + duration <= window_end and len(suggestions) < MAX_SUGGESTION_POOL:
+        suggestions.append({"start": cursor, "end": cursor + duration})
+        cursor += increment
+    return suggestions
+
+
+DAYPART_BUCKETS = (
+    ("morning", 6, 12),
+    ("afternoon", 12, 17),
+    ("evening", 17, 22),
+)
+QUIET_HOURS = (6, 22)  # inclusive start, exclusive end
+
+
+def _get_zone(tz_name: Optional[str]) -> ZoneInfo:
+    try:
+        return ZoneInfo(tz_name) if tz_name else ZoneInfo("UTC")
+    except Exception:
+        return ZoneInfo("UTC")
+
+
+def _prioritize_human_friendly_slots(
+    slots: List[Dict[str, datetime]],
+    tz_name: Optional[str],
+    max_suggestions: int,
+) -> List[Dict[str, datetime]]:
+    if not slots:
+        return []
+
+    tz = _get_zone(tz_name)
+    in_hours: List[Dict[str, datetime]] = []
+    out_of_hours: List[Dict[str, datetime]] = []
+
+    for slot in slots:
+        local_start = slot["start"].astimezone(tz)
+        hour = local_start.hour
+        if QUIET_HOURS[0] <= hour < QUIET_HOURS[1]:
+            in_hours.append({**slot, "_local_hour": hour})
+        else:
+            out_of_hours.append(slot)
+
+    if not in_hours:
+        return slots[:max_suggestions]
+
+    buckets: Dict[str, List[Dict[str, datetime]]] = {name: [] for name, _, _ in DAYPART_BUCKETS}
+    leftovers: List[Dict[str, datetime]] = []
+    for slot in in_hours:
+        hour = slot.pop("_local_hour")
+        placed = False
+        for name, start_hour, end_hour in DAYPART_BUCKETS:
+            if start_hour <= hour < end_hour:
+                buckets[name].append(slot)
+                placed = True
+                break
+        if not placed:
+            leftovers.append(slot)
+
+    prioritized: List[Dict[str, datetime]] = []
+    while len(prioritized) < max_suggestions:
+        picked = False
+        for name, _, _ in DAYPART_BUCKETS:
+            bucket = buckets[name]
+            if bucket:
+                prioritized.append(bucket.pop(0))
+                picked = True
+                if len(prioritized) >= max_suggestions:
+                    break
+        if not picked:
+            break
+
+    if len(prioritized) < max_suggestions:
+        remaining: List[Dict[str, datetime]] = []
+        for name, _, _ in DAYPART_BUCKETS:
+            remaining.extend(buckets[name])
+        remaining.extend(leftovers)
+        remaining.extend(out_of_hours)
+        for slot in remaining:
+            if slot not in prioritized:
+                prioritized.append(slot)
+            if len(prioritized) >= max_suggestions:
+                break
+
+    return prioritized[:max_suggestions]
 
 # Request models for notification endpoints
 class UpdateNotificationRequest(BaseModel):
@@ -34,10 +178,53 @@ class CancellationNotificationRequest(BaseModel):
 class AddParticipantsRequest(BaseModel):
     emails: List[str] = Field(default_factory=list)
 
+
+class AvailabilityRequest(BaseModel):
+    participants: List[str]
+    duration_minutes: int
+    window_start: datetime
+    window_end: datetime
+    slot_increment_minutes: int = 30
+    max_suggestions: int = 5
+    client_timezone: Optional[str] = None
+
+
+class PollOptionPayload(BaseModel):
+    start_time: datetime
+    end_time: datetime
+
+
+class CreatePollRequest(BaseModel):
+    options: List[PollOptionPayload]
+    deadline: Optional[datetime] = None
+
+
+class VoteRequest(BaseModel):
+    option_id: str
+    voter_email: str
+
+
+class FinalizePollRequest(BaseModel):
+    option_id: Optional[str] = None
+
+
+class RoomsAvailabilityResponse(BaseModel):
+    rooms: List[RoomAvailability]
+
+
+CurrentUser = Annotated[User, Depends(get_current_user_token)]
+
+
+def _ensure_meeting_owner(meeting: Meeting, current_user: CurrentUser) -> None:
+    """Guard that only the organizer can mutate/read their meetings."""
+    if meeting.organizer_email and meeting.organizer_email != current_user.email:
+        raise HTTPException(status_code=403, detail="You can only manage meetings you created.")
+
 # Initialize services after database connection
 meeting_service = None
 metadata_service = None
 user_service = None
+poll_service = None
 
 async def process_email_reply(meeting_id: str, from_email: str, action: str, payload: str | None):
     # Basic placeholder actions: record metadata; real logic can update meetings
@@ -51,6 +238,7 @@ async def process_email_reply(meeting_id: str, from_email: str, action: str, pay
 
 
 reply_listener: EmailReplyListener | None = None
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 
 
 @asynccontextmanager
@@ -59,10 +247,11 @@ async def lifespan(app: FastAPI):
     await MongoDB.connect_to_mongo()
     
     # Initialize services after database connection
-    global meeting_service, metadata_service, user_service
+    global meeting_service, metadata_service, user_service, poll_service
     meeting_service = MeetingService()
     metadata_service = MetadataService()
     user_service = UserService()
+    poll_service = PollService()
     global reply_listener
     reply_listener = EmailReplyListener(process_email_reply)
     await reply_listener.start()
@@ -96,10 +285,6 @@ app.add_middleware(
     allowed_hosts=["*"]
 )
 
-# Mock authentication function that doesn't require a token
-async def get_current_user():
-    return {"user_id": "mock_user", "email": "user@example.com"}
-
 @app.get("/health")
 async def health_check():
     return {
@@ -108,56 +293,212 @@ async def health_check():
         "service": "meeting-scheduler-backend"
     }
 
+
+@app.get("/api/health")
+async def health_check_api():
+    return await health_check()
+
+
+@app.get("/api/me")
+async def get_me(current_user: CurrentUser):
+    user_dict = current_user.model_dump()
+    user_dict.pop("preferences", None)
+    user_dict.pop("calendars", None)
+    if "id" in user_dict and user_dict["id"] is not None:
+        user_dict["id"] = str(user_dict["id"])
+    if "_id" in user_dict and user_dict["_id"] is not None:
+        user_dict["_id"] = str(user_dict["_id"])
+    return user_dict
+
+
+@app.get("/api/rooms", response_model=List[Room])
+async def list_rooms(current_user: CurrentUser):
+    return ROOMS_CATALOG
+
+
+@app.get("/api/rooms/availability", response_model=RoomsAvailabilityResponse)
+async def room_availability(
+    current_user: CurrentUser,
+    start_time: datetime = Query(..., description="Start of the window to check (ISO8601)"),
+    end_time: datetime = Query(..., description="End of the window to check (ISO8601)"),
+    exclude_meeting_id: Optional[str] = None,
+):
+    if end_time <= start_time:
+        raise HTTPException(status_code=400, detail="end_time must be after start_time")
+    availability = await meeting_service.get_rooms_availability(start_time, end_time, exclude_meeting_id)
+    return RoomsAvailabilityResponse(rooms=availability)
+
+
+@app.get("/api/calendars/events")
+async def get_calendar_events(
+    time_min: datetime,
+    time_max: datetime,
+    current_user: CurrentUser,
+):
+    creds = (current_user.preferences or {}).get("google_credentials")
+    if not creds:
+        raise HTTPException(status_code=400, detail="Google account not connected")
+    try:
+        events = await anyio.to_thread.run_sync(
+            calendar_list_events,
+            creds,
+            _ensure_tz(time_min),
+            _ensure_tz(time_max),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load events: {exc}") from exc
+    return {"events": events}
+
+
+@app.get("/api/auth/google/login")
+async def google_login(redirect_uri: Optional[str] = Query(default=None)):
+    if metadata_service is None:
+        raise HTTPException(status_code=503, detail="Metadata service unavailable")
+    state = str(uuid.uuid4())
+    await metadata_service.create_metadata(
+        key=f"oauth_state:{state}",
+        value={
+            "created_at": datetime.utcnow().isoformat(),
+            "redirect_uri": redirect_uri,
+        },
+        metadata_type="oauth_state",
+        description="Google auth state"
+    )
+    auth_url = generate_auth_url(state)
+    return {"auth_url": auth_url}
+
+
+@app.get("/api/auth/google/callback")
+async def google_auth_callback(code: str, state: Optional[str] = None):
+    if metadata_service is None or user_service is None:
+        raise HTTPException(status_code=503, detail="Service unavailable")
+    if not state:
+        raise HTTPException(status_code=400, detail="Missing state parameter")
+    state_key = f"oauth_state:{state}"
+    state_entry = await metadata_service.get_metadata(state_key)
+    if not state_entry:
+        raise HTTPException(status_code=400, detail="Invalid or expired state")
+    await metadata_service.delete_metadata(state_key)
+    redirect_uri = None
+    if isinstance(state_entry.value, dict):
+        redirect_uri = state_entry.value.get("redirect_uri")
+
+    tokens = exchange_code_for_tokens(code)
+    id_token_jwt = tokens.get("id_token")
+    if not id_token_jwt:
+        raise HTTPException(status_code=400, detail="Missing id_token from Google response")
+
+    try:
+        id_info = google_id_token.verify_oauth2_token(
+            id_token_jwt,
+            google_requests.Request(),
+            GOOGLE_CLIENT_ID
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid Google ID token") from exc
+
+    email = id_info.get("email")
+    sub = id_info.get("sub")
+    name = id_info.get("name") or email
+    picture = id_info.get("picture")
+
+    if not email or not sub:
+        raise HTTPException(status_code=400, detail="Google account missing email or subject")
+
+    user = await user_service.upsert_google_user(
+        email=email,
+        name=name,
+        google_sub=sub,
+        picture=picture,
+        credentials=tokens,
+    )
+
+    access_token = create_access_token({"sub": sub})
+
+    if redirect_uri:
+        redirect = f"{redirect_uri}?token={access_token}"
+        return RedirectResponse(redirect)
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": user,
+    }
+
 @app.get("/api/meetings", response_model=List[Meeting])
-async def get_meetings():
+async def get_meetings(current_user: CurrentUser):
     """Get all meetings for the current user"""
-    return await meeting_service.get_all_meetings()
+    return await meeting_service.get_all_meetings(current_user.email)
 
 @app.post("/api/meetings", response_model=Meeting)
-async def create_meeting(meeting_data: MeetingCreate):
+async def create_meeting(meeting_data: MeetingCreate, current_user: CurrentUser):
     """Create a new meeting"""
-    # Validate that end time is after start time
-    if meeting_data.end_time <= meeting_data.start_time:
+    # Validate that end time is after start time and start is in the future (unless poll pending)
+    now = datetime.now(timezone.utc)
+    start_time = _ensure_tz(meeting_data.start_time)
+    end_time = _ensure_tz(meeting_data.end_time)
+    meeting_data.start_time = start_time
+    meeting_data.end_time = end_time
+    poll_pending = bool((meeting_data.metadata or {}).get("poll_pending"))
+    if not poll_pending and start_time <= now:
+        raise HTTPException(status_code=400, detail="Start time must be in the future.")
+    if end_time <= start_time:
         raise HTTPException(status_code=400, detail="End time must be after start time. Please choose an end time later than the start.")
-    # Enforce minimum meeting duration of 5 minutes
     from datetime import timedelta
-    if (meeting_data.end_time - meeting_data.start_time) < timedelta(minutes=5):
+    if (end_time - start_time) < timedelta(minutes=5):
         raise HTTPException(status_code=400, detail="Meeting duration must be at least 5 minutes. Extend the end time or move the start time earlier.")
 
     # Create meeting in DB first
-    meeting = await meeting_service.create_meeting(meeting_data, meeting_data.metadata)
-
-    # Attempt to create a real Google Meet link if user connected Google
     try:
-        current = await get_current_user()
-        user = await user_service.get_user(current["email"]) if user_service else None
-        if not user:
-            # Auto-create user record if not exists
-            user = await user_service.create_user(current["email"], current.get("user_id", "user"))
+        meeting = await meeting_service.create_meeting(
+            meeting_data,
+            meeting_data.metadata,
+            organizer_email=current_user.email,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # Attempt to create calendar events if user connected Google
+    try:
+        user = current_user
         prefs = user.preferences if user else {}
         creds = prefs.get("google_credentials")
         location_type = (meeting.metadata or {}).get("location_type", "online")
-        if creds and location_type == "online":
+        if creds:
             attendees = [p.email for p in meeting.participants]
-            timezone = os.getenv("DEFAULT_TIMEZONE", "UTC")
+            event_timezone = os.getenv("DEFAULT_TIMEZONE", "UTC")
+            location_text = (meeting.metadata or {}).get("room_location") or (meeting.metadata or {}).get("room_name")
             from functools import partial
-            create_fn = partial(
-                create_event_with_meet,
-                creds,
-                title=meeting.title,
-                description=meeting.description,
-                start_time=meeting.start_time,
-                end_time=meeting.end_time,
-                attendees=attendees,
-                timezone=timezone,
-            )
+            if location_type == "online":
+                create_fn = partial(
+                    create_event_with_meet,
+                    creds,
+                    title=meeting.title,
+                    description=meeting.description,
+                    start_time=meeting.start_time,
+                    end_time=meeting.end_time,
+                    attendees=attendees,
+                    timezone=event_timezone,
+                )
+            else:
+                create_fn = partial(
+                    create_calendar_event,
+                    creds,
+                    title=meeting.title,
+                    description=meeting.description,
+                    start_time=meeting.start_time,
+                    end_time=meeting.end_time,
+                    attendees=attendees,
+                    timezone=event_timezone,
+                    location=location_text,
+                )
             created = await anyio.to_thread.run_sync(create_fn)
-            # Update meeting metadata with real Meet URL and Google event info
+            # Update meeting metadata with Google event info
             new_meta = dict(meeting.metadata or {})
-            new_meta["meeting_platform"] = "google_meet"
-            if created.meet_url:
-                new_meta["meeting_url"] = created.meet_url
+            if location_type == "online":
+                new_meta["meeting_platform"] = "google_meet"
+                if created.meet_url:
+                    new_meta["meeting_url"] = created.meet_url
             if created.event_id:
                 new_meta["google_event_id"] = created.event_id
             if created.html_link:
@@ -169,24 +510,95 @@ async def create_meeting(meeting_data: MeetingCreate):
 
     return meeting
 
+
+@app.post("/api/availability/suggest")
+async def suggest_availability(request: AvailabilityRequest, current_user: CurrentUser):
+    if not request.participants:
+        raise HTTPException(status_code=400, detail="Participants are required")
+    window_start = _ensure_tz(request.window_start)
+    window_end = _ensure_tz(request.window_end)
+    if window_end <= window_start:
+        raise HTTPException(status_code=400, detail="window_end must be after window_start")
+    duration = timedelta(minutes=request.duration_minutes)
+    if duration <= timedelta(minutes=0):
+        raise HTTPException(status_code=400, detail="duration_minutes must be positive")
+    increment = timedelta(minutes=request.slot_increment_minutes)
+    participants = list(dict.fromkeys([*(request.participants or []), current_user.email]))
+
+    client_timezone = request.client_timezone or os.getenv("DEFAULT_TIMEZONE", "UTC")
+
+    missing: List[str] = []
+    missing_details: Dict[str, str] = {}
+    busy: List[tuple[datetime, datetime]] = []
+
+    for email in participants:
+        user = await user_service.get_user(email)
+        creds = (user.preferences or {}).get("google_credentials") if user else None
+        if not creds:
+            missing.append(email)
+            missing_details[email] = "Google Calendar not connected"
+            continue
+        try:
+            busy_blocks = await anyio.to_thread.run_sync(
+                get_free_busy,
+                creds,
+                window_start,
+                window_end,
+            )
+        except Exception as exc:
+            missing.append(email)
+            missing_details[email] = f"Calendar access failed: {exc}"
+            continue
+        for block in busy_blocks:
+            busy.append(_parse_busy_entry(block))
+
+    merged_busy = _merge_intervals(busy)
+    suggestions = _generate_suggestions(
+        merged_busy,
+        window_start,
+        window_end,
+        duration,
+        increment,
+        request.max_suggestions,
+    )
+    now = datetime.now(timezone.utc)
+    suggestions = [slot for slot in suggestions if slot["end"] > now]
+    suggestions = _prioritize_human_friendly_slots(
+        suggestions,
+        client_timezone,
+        request.max_suggestions,
+    )
+
+    return {
+        "suggestions": [
+            {"start": slot["start"].isoformat(), "end": slot["end"].isoformat()}
+            for slot in suggestions
+        ],
+        "participants_missing": missing,
+        "participants_missing_details": missing_details,
+    }
+
 @app.get("/api/meetings/{meeting_id}", response_model=Meeting)
-async def get_meeting(meeting_id: str):
+async def get_meeting(meeting_id: str, current_user: CurrentUser):
     """Get a specific meeting by ID"""
     meeting = await meeting_service.get_meeting(meeting_id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
+    _ensure_meeting_owner(meeting, current_user)
+    _ensure_meeting_owner(meeting, current_user)
 
     if meeting.status == "completed" or meeting.end_time <= datetime.utcnow():
         raise HTTPException(status_code=400, detail="Cannot generate event for a completed meeting.")
     return meeting
 
 @app.put("/api/meetings/{meeting_id}", response_model=Meeting)
-async def update_meeting(meeting_id: str, meeting_update: MeetingUpdate):
+async def update_meeting(meeting_id: str, meeting_update: MeetingUpdate, current_user: CurrentUser):
     """Update a meeting"""
     # Validate new times against current meeting to ensure min duration and proper ordering
     current_meeting = await meeting_service.get_meeting(meeting_id)
     if not current_meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
+    _ensure_meeting_owner(current_meeting, current_user)
 
     if current_meeting.status == "completed" or current_meeting.end_time <= datetime.utcnow():
         raise HTTPException(status_code=400, detail="Completed meetings cannot be modified.")
@@ -209,81 +621,99 @@ async def update_meeting(meeting_id: str, meeting_update: MeetingUpdate):
     if time_changed and meeting_update.status is None:
         meeting_update.status = "rescheduled"
 
-    meeting = await meeting_service.update_meeting(meeting_id, meeting_update)
+    try:
+        meeting = await meeting_service.update_meeting(meeting_id, meeting_update)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
 
     # Sync changes to Google Calendar if event exists or create one if needed for online meetings
     try:
-        current = await get_current_user()
-        user = await user_service.get_user(current["email"]) if user_service else None
+        user = current_user
         prefs = user.preferences if user else {}
         creds = prefs.get("google_credentials")
         if creds:
-            timezone = os.getenv("DEFAULT_TIMEZONE", "UTC")
+            event_timezone = os.getenv("DEFAULT_TIMEZONE", "UTC")
             google_event_id = (meeting.metadata or {}).get("google_event_id")
+            location_type = (meeting.metadata or {}).get("location_type", "online")
+            location_text = (meeting.metadata or {}).get("room_location") or (meeting.metadata or {}).get("room_name")
+            attendees = [p.email for p in meeting.participants]
 
-            if not google_event_id and (meeting.metadata or {}).get("location_type", "online") == "online":
-                # Create an event now
+            if not google_event_id:
                 from functools import partial
-                attendees = [p.email for p in meeting.participants]
-                create_fn = partial(
-                    create_event_with_meet,
-                    creds,
-                    title=meeting.title,
-                    description=meeting.description,
-                    start_time=meeting.start_time,
-                    end_time=meeting.end_time,
-                    attendees=attendees,
-                    timezone=timezone,
-                )
+                if location_type == "online":
+                    create_fn = partial(
+                        create_event_with_meet,
+                        creds,
+                        title=meeting.title,
+                        description=meeting.description,
+                        start_time=meeting.start_time,
+                        end_time=meeting.end_time,
+                        attendees=attendees,
+                        timezone=event_timezone,
+                    )
+                else:
+                    create_fn = partial(
+                        create_calendar_event,
+                        creds,
+                        title=meeting.title,
+                        description=meeting.description,
+                        start_time=meeting.start_time,
+                        end_time=meeting.end_time,
+                        attendees=attendees,
+                        timezone=event_timezone,
+                        location=location_text,
+                    )
                 created = await anyio.to_thread.run_sync(create_fn)
                 meta = dict(meeting.metadata or {})
-                meta["meeting_platform"] = "google_meet"
-                if created.meet_url:
-                    meta["meeting_url"] = created.meet_url
+                if location_type == "online":
+                    meta["meeting_platform"] = "google_meet"
+                    if created.meet_url:
+                        meta["meeting_url"] = created.meet_url
                 if created.event_id:
                     meta["google_event_id"] = created.event_id
                 if created.html_link:
                     meta["google_event_link"] = created.html_link
                 meeting = await meeting_service.update_meeting_metadata(str(meeting.id), meta) or meeting
-            else:
-                # Update existing event with new details and attendees
-                if google_event_id:
-                    from functools import partial
-                    attendees = [p.email for p in meeting.participants]
-                    update_fn = partial(
-                        update_event,
-                        creds,
-                        event_id=google_event_id,
-                        title=meeting.title,
-                        description=meeting.description,
-                        start_time=meeting.start_time,
-                        end_time=meeting.end_time,
-                        timezone=timezone,
-                        attendees=attendees,
-                        send_updates="all",
-                    )
-                    await anyio.to_thread.run_sync(update_fn)
+            elif google_event_id:
+                from functools import partial
+                update_fn = partial(
+                    update_event,
+                    creds,
+                    event_id=google_event_id,
+                    title=meeting.title,
+                    description=meeting.description,
+                    start_time=meeting.start_time,
+                    end_time=meeting.end_time,
+                    timezone=event_timezone,
+                    attendees=attendees,
+                )
+                await anyio.to_thread.run_sync(update_fn)
     except Exception as e:
         print(f"Google Calendar sync on update failed: {e}")
 
     return meeting
 
 @app.delete("/api/meetings/{meeting_id}")
-async def delete_meeting(meeting_id: str):
+async def delete_meeting(meeting_id: str, current_user: CurrentUser):
     """Delete a meeting"""
+    meeting = await meeting_service.get_meeting(meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    _ensure_meeting_owner(meeting, current_user)
     success = await meeting_service.delete_meeting(meeting_id)
     if not success:
         raise HTTPException(status_code=404, detail="Meeting not found")
     return {"message": "Meeting deleted successfully"}
 
 @app.post("/api/meetings/{meeting_id}/send-invitation")
-async def send_invitation(meeting_id: str):
+async def send_invitation(meeting_id: str, current_user: CurrentUser):
     """Send invitation for a meeting to all participants"""
     meeting = await meeting_service.get_meeting(meeting_id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
+    _ensure_meeting_owner(meeting, current_user)
     
     # Send invitations to all participants
     results = await notification_service.send_bulk_invitations(meeting)
@@ -297,11 +727,12 @@ async def send_invitation(meeting_id: str):
     }
 
 @app.post("/api/meetings/{meeting_id}/send-reminder")
-async def send_reminder(meeting_id: str):
+async def send_reminder(meeting_id: str, current_user: CurrentUser):
     """Send reminder for a meeting to all participants"""
     meeting = await meeting_service.get_meeting(meeting_id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
+    _ensure_meeting_owner(meeting, current_user)
     
     # Send reminders to all participants
     results = await notification_service.send_bulk_reminders(meeting, hours_before=1)
@@ -315,11 +746,12 @@ async def send_reminder(meeting_id: str):
     }
 
 @app.post("/api/meetings/{meeting_id}/send-update")
-async def send_update_notification(meeting_id: str, request: UpdateNotificationRequest):
+async def send_update_notification(meeting_id: str, request: UpdateNotificationRequest, current_user: CurrentUser):
     """Send update notification for a meeting to all participants"""
     meeting = await meeting_service.get_meeting(meeting_id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
+    _ensure_meeting_owner(meeting, current_user)
     
     # Send update notifications to all participants
     results = {}
@@ -337,11 +769,12 @@ async def send_update_notification(meeting_id: str, request: UpdateNotificationR
     }
 
 @app.post("/api/meetings/{meeting_id}/send-cancellation")
-async def send_cancellation_notification(meeting_id: str, request: CancellationNotificationRequest):
+async def send_cancellation_notification(meeting_id: str, request: CancellationNotificationRequest, current_user: CurrentUser):
     """Send cancellation notification for a meeting to all participants"""
     meeting = await meeting_service.get_meeting(meeting_id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
+    _ensure_meeting_owner(meeting, current_user)
     
     # Send cancellation notifications to all participants
     results = {}
@@ -359,32 +792,33 @@ async def send_cancellation_notification(meeting_id: str, request: CancellationN
     }
 
 @app.post("/api/meetings/{meeting_id}/generate-meet-link", response_model=Meeting)
-async def generate_meet_link(meeting_id: str):
+async def generate_meet_link(meeting_id: str, current_user: CurrentUser):
     """Generate and attach a Google Meet link for a meeting"""
+    existing = await meeting_service.get_meeting(meeting_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    _ensure_meeting_owner(existing, current_user)
     meeting = await meeting_service.generate_meet_link(meeting_id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
     return meeting
 
 @app.post("/api/meetings/{meeting_id}/create-google-event", response_model=Meeting)
-async def create_google_event(meeting_id: str):
+async def create_google_event(meeting_id: str, current_user: CurrentUser):
     """Create a Google Calendar event with a Meet link for this meeting"""
     meeting = await meeting_service.get_meeting(meeting_id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
+    _ensure_meeting_owner(meeting, current_user)
 
-    current = await get_current_user()
-    user = await user_service.get_user(current["email"]) if user_service else None
-    if not user:
-        raise HTTPException(status_code=400, detail="User not initialized")
-
+    user = current_user
     prefs = user.preferences or {}
     creds = prefs.get("google_credentials")
     if not creds:
         raise HTTPException(status_code=400, detail="Google account not connected")
 
     attendees = [p.email for p in meeting.participants]
-    timezone = os.getenv("DEFAULT_TIMEZONE", "UTC")
+    event_timezone = os.getenv("DEFAULT_TIMEZONE", "UTC")
     try:
         from functools import partial
         create_fn = partial(
@@ -395,7 +829,7 @@ async def create_google_event(meeting_id: str):
             start_time=meeting.start_time,
             end_time=meeting.end_time,
             attendees=attendees,
-            timezone=timezone,
+            timezone=event_timezone,
         )
         created = await anyio.to_thread.run_sync(create_fn)
     except Exception as e:
@@ -414,7 +848,7 @@ async def create_google_event(meeting_id: str):
     return updated or meeting
 
 @app.post("/api/meetings/{meeting_id}/participants", response_model=Meeting)
-async def add_meeting_participants(meeting_id: str, request: AddParticipantsRequest):
+async def add_meeting_participants(meeting_id: str, request: AddParticipantsRequest, current_user: CurrentUser):
     """Add participants to a meeting and update Google Calendar event if present"""
     if not request.emails:
         raise HTTPException(status_code=400, detail="No emails provided")
@@ -422,6 +856,7 @@ async def add_meeting_participants(meeting_id: str, request: AddParticipantsRequ
     existing_meeting = await meeting_service.get_meeting(meeting_id)
     if not existing_meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
+    _ensure_meeting_owner(existing_meeting, current_user)
 
     if existing_meeting.status == "completed" or existing_meeting.end_time <= datetime.utcnow():
         raise HTTPException(status_code=400, detail="Cannot modify a completed meeting.")
@@ -434,8 +869,7 @@ async def add_meeting_participants(meeting_id: str, request: AddParticipantsRequ
     google_event_id = (meeting.metadata or {}).get("google_event_id")
     if google_event_id:
         try:
-            current = await get_current_user()
-            user = await user_service.get_user(current["email"]) if user_service else None
+            user = current_user
             creds = (user.preferences or {}).get("google_credentials") if user else None
             if creds:
                 from functools import partial
@@ -453,66 +887,111 @@ async def add_meeting_participants(meeting_id: str, request: AddParticipantsRequ
 
     return meeting
 
-@app.get("/api/google/auth-url")
-async def get_google_auth_url():
-    """Get Google OAuth authorization URL for the current user"""
-    current = await get_current_user()
-    # Create user if missing
-    user = await user_service.get_user(current["email"]) if user_service else None
-    if not user:
-        user = await user_service.create_user(current["email"], current.get("user_id", "user"))
 
-    # Generate state and store temporarily in user prefs
-    import uuid
-    state = str(uuid.uuid4())
-    prefs = dict(user.preferences or {})
-    prefs["google_oauth_state"] = state
-    await user_service.update_user_preferences(user.email, prefs)
+@app.post("/api/meetings/{meeting_id}/polls")
+async def create_poll(meeting_id: str, request: CreatePollRequest, current_user: CurrentUser):
+    if poll_service is None:
+        raise HTTPException(status_code=503, detail="Poll service unavailable")
+    meeting = await meeting_service.get_meeting(meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    if not request.options:
+        raise HTTPException(status_code=400, detail="At least one option is required")
 
+    options_payload = [
+        {"start_time": opt.start_time, "end_time": opt.end_time}
+        for opt in request.options
+    ]
+    poll = await poll_service.create_poll(
+        meeting_id=meeting_id,
+        organizer_email=current_user.email,
+        options=options_payload,
+        deadline=request.deadline,
+    )
+
+    meta = dict(meeting.metadata or {})
+    meta["poll_id"] = str(poll.id)
+    await meeting_service.update_meeting_metadata(meeting_id, meta)
+
+    poll_url = f"{os.getenv('FRONTEND_URL', 'http://localhost:3000')}/poll/{poll.id}"
+    for participant in meeting.participants:
+        await notification_service.send_poll_invitation(meeting, participant, poll_url)
+
+    return poll
+
+
+@app.get("/api/polls/{poll_id}")
+async def get_poll(poll_id: str):
+    poll = await poll_service.get_poll(poll_id)
+    if not poll:
+        raise HTTPException(status_code=404, detail="Poll not found")
+    meeting = await meeting_service.get_meeting(poll.meeting_id)
+    return _serialize_poll(poll, meeting)
+
+
+@app.post("/api/polls/{poll_id}/vote")
+async def vote_poll(poll_id: str, request: VoteRequest):
     try:
-        url = generate_auth_url(state)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create auth URL: {e}")
-    return {"auth_url": url}
+        poll = await poll_service.add_vote(poll_id, request.option_id, request.voter_email)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not poll:
+        raise HTTPException(status_code=404, detail="Poll not found")
+    meeting = await meeting_service.get_meeting(poll.meeting_id)
+    return _serialize_poll(poll, meeting)
+
+
+@app.post("/api/polls/{poll_id}/finalize")
+async def finalize_poll(poll_id: str, request: FinalizePollRequest, current_user: CurrentUser):
+    poll = await poll_service.finalize_poll(poll_id, request.option_id)
+    if not poll:
+        raise HTTPException(status_code=404, detail="Poll not found")
+    if poll.organizer_email and poll.organizer_email != current_user.email:
+        raise HTTPException(status_code=403, detail="You can only finalize polls you created.")
+
+    meeting = await meeting_service.get_meeting(poll.meeting_id)
+    if poll.winning_option_id and meeting:
+        winning_option = next((opt for opt in poll.options if opt.id == poll.winning_option_id), None)
+        if winning_option:
+            update = MeetingUpdate(
+                start_time=winning_option.start_time,
+                end_time=winning_option.end_time,
+                status="scheduled",
+            )
+            await meeting_service.update_meeting(poll.meeting_id, update)
+            # Remove poll pending flag if present
+            meta = dict(meeting.metadata or {})
+            if meta.pop("poll_pending", None):
+                await meeting_service.update_meeting_metadata(poll.meeting_id, meta)
+            for participant in meeting.participants:
+                await notification_service.send_poll_finalized(meeting, participant, winning_option)
+
+    return _serialize_poll(poll, meeting)
+
+
+@app.get("/api/google/auth-url")
+async def legacy_google_auth_url():
+    """Backward compatible endpoint for older frontend builds"""
+    return await google_login()
+
 
 @app.get("/api/google/callback")
-async def google_oauth_callback(code: str, state: str | None = None):
-    """OAuth callback to exchange authorization code for tokens"""
-    current = await get_current_user()
-    user = await user_service.get_user(current["email"]) if user_service else None
-    if not user:
-        raise HTTPException(status_code=400, detail="User not initialized")
-
-    expected_state = (user.preferences or {}).get("google_oauth_state")
-    if expected_state and state and state != expected_state:
-        raise HTTPException(status_code=400, detail="Invalid state parameter")
-
-    try:
-        creds_dict = exchange_code_for_tokens(code)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Token exchange failed: {e}")
-
-    # Store tokens in user preferences
-    prefs = dict(user.preferences or {})
-    prefs.pop("google_oauth_state", None)
-    prefs["google_credentials"] = creds_dict
-    updated = await user_service.update_user_preferences(user.email, prefs)
-    if not updated:
-        raise HTTPException(status_code=500, detail="Failed to save Google credentials")
-    return {"status": "connected"}
+async def legacy_google_callback(code: str, state: Optional[str] = None):
+    return await google_auth_callback(code, state)
 
 @app.post("/api/metadata", response_model=Metadata)
 async def create_metadata(
+    current_user: CurrentUser,
     key: str,
     value: Any,
     metadata_type: str,
-    description: Optional[str] = None
+    description: Optional[str] = None,
 ):
     """Create metadata entry"""
     return await metadata_service.create_metadata(key, value, metadata_type, description)
 
 @app.get("/api/metadata/{key}", response_model=Metadata)
-async def get_metadata(key: str):
+async def get_metadata(key: str, current_user: CurrentUser):
     """Get metadata by key"""
     metadata = await metadata_service.get_metadata(key)
     if not metadata:
@@ -520,16 +999,17 @@ async def get_metadata(key: str):
     return metadata
 
 @app.get("/api/metadata", response_model=List[Metadata])
-async def get_all_metadata():
+async def get_all_metadata(current_user: CurrentUser):
     """Get all metadata"""
     return await metadata_service.get_all_metadata()
 
 @app.put("/api/metadata/{key}", response_model=Metadata)
 async def update_metadata(
+    current_user: CurrentUser,
     key: str,
     value: Any,
     metadata_type: str,
-    description: Optional[str] = None
+    description: Optional[str] = None,
 ):
     """Update metadata"""
     metadata = await metadata_service.update_metadata(key, value, metadata_type, description)
@@ -538,7 +1018,7 @@ async def update_metadata(
     return metadata
 
 @app.delete("/api/metadata/{key}")
-async def delete_metadata(key: str):
+async def delete_metadata(key: str, current_user: CurrentUser):
     """Delete metadata by key"""
     success = await metadata_service.delete_metadata(key)
     if not success:
@@ -548,7 +1028,8 @@ async def delete_metadata(key: str):
 @app.put("/api/meetings/{meeting_id}/metadata")
 async def update_meeting_metadata(
     meeting_id: str,
-    metadata: Dict[str, Any]
+    metadata: Dict[str, Any],
+    current_user: CurrentUser,
 ):
     """Update meeting metadata"""
     meeting = await meeting_service.update_meeting_metadata(meeting_id, metadata)
@@ -577,3 +1058,14 @@ if __name__ == "__main__":
         port=int(os.getenv("PORT", 8000)),
         reload=True
     )
+def _serialize_poll(poll: Poll, meeting: Optional[Meeting] = None) -> Dict[str, Any]:
+    poll_dict = poll.model_dump(mode="json")
+    if meeting:
+        poll_dict["meeting_summary"] = {
+            "title": meeting.title,
+            "description": meeting.description,
+            "start_time": meeting.start_time.isoformat(),
+            "end_time": meeting.end_time.isoformat(),
+            "organizer_email": meeting.organizer_email,
+        }
+    return poll_dict

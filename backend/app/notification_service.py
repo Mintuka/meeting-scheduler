@@ -391,5 +391,34 @@ class EmailNotificationService:
             results[participant.email] = await self.send_meeting_reminder(meeting, participant, hours_before)
         return results
 
+    async def send_poll_invitation(self, meeting: Meeting, participant: Participant, poll_url: str) -> bool:
+        try:
+            subject = f"[MS-{meeting.id}] Vote on meeting times for {meeting.title}"
+            html_content = f"""
+            <p>Hello {participant.name},</p>
+            <p>The organizer is collecting availability for <strong>{meeting.title}</strong>.</p>
+            <p>Please vote for your preferred time here: <a href="{poll_url}">{poll_url}</a></p>
+            <p>Thank you!</p>
+            """
+            return await self.send_email(participant.email, subject, html_content)
+        except Exception as exc:
+            logger.error(f"Failed to send poll invitation: {exc}")
+            return False
+
+    async def send_poll_finalized(self, meeting: Meeting, participant: Participant, option) -> bool:
+        try:
+            subject = f"[MS-{meeting.id}] Meeting finalized: {meeting.title}"
+            start = option.start_time.strftime("%A, %B %d %Y %I:%M %p")
+            end = option.end_time.strftime("%I:%M %p")
+            html_content = f"""
+            <p>Hello {participant.name},</p>
+            <p>The meeting <strong>{meeting.title}</strong> has been scheduled for {start} - {end}.</p>
+            <p>See you then!</p>
+            """
+            return await self.send_email(participant.email, subject, html_content)
+        except Exception as exc:
+            logger.error(f"Failed to send poll finalized notification: {exc}")
+            return False
+
 # Global notification service instance
 notification_service = EmailNotificationService()
