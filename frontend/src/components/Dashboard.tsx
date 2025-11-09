@@ -1,24 +1,36 @@
-import React, { useState, useEffect } from 'react';
-import { Calendar, Plus, Users, Clock } from 'lucide-react';
-import { Meeting } from '../types';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Calendar, Plus, Clock, LogOut } from 'lucide-react';
+import { Meeting, Poll } from '../types';
 import { MeetingForm } from './MeetingForm';
-import { MeetingList } from './MeetingList';
 import { Modal } from './Modal';
 import { EditMeetingForm } from './EditMeetingForm';
 import { AISchedulerService } from '../services/AISchedulerService';
 import { notificationService } from '../services/NotificationService';
+import { useAuth } from '../context/AuthContext';
+import { CalendarView } from './CalendarView';
 
 export const Dashboard: React.FC = () => {
+  const { user, isLoading: authLoading, loginWithGoogle, logout } = useAuth();
   const [meetings, setMeetings] = useState<Meeting[]>([]);
+  const [pollSummaries, setPollSummaries] = useState<Record<string, Poll | null>>({});
   const [showForm, setShowForm] = useState(false);
   const [editMeeting, setEditMeeting] = useState<Meeting | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(() => new Date());
+  const [calendarEvents, setCalendarEvents] = useState<any[]>([]);
 
   useEffect(() => {
-    loadMeetings();
-  }, []);
+    if (user) {
+      loadMeetings();
+      loadCalendar();
+    } else {
+      setMeetings([]);
+      setCalendarEvents([]);
+      setIsLoading(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -27,10 +39,37 @@ export const Dashboard: React.FC = () => {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    const pollIds = Array.from(
+      new Set(
+        meetings
+          .map((meeting) => meeting.metadata?.poll_id)
+          .filter((id): id is string => Boolean(id))
+      )
+    );
+    const missing = pollIds.filter((id) => pollSummaries[id] === undefined);
+    if (missing.length === 0) {
+      return;
+    }
+    missing.forEach(async (pollId) => {
+      try {
+        const poll = await AISchedulerService.getPoll(pollId);
+        setPollSummaries((prev) => ({ ...prev, [pollId]: poll }));
+      } catch (error) {
+        console.error('Error loading poll details:', error);
+        setPollSummaries((prev) => ({ ...prev, [pollId]: null }));
+      }
+    });
+  }, [meetings, pollSummaries]);
+
   const loadMeetings = async () => {
     try {
       setIsLoading(true);
       setError(null);
+      if (!user) {
+        setMeetings([]);
+        return;
+      }
       const fetchedMeetings = await AISchedulerService.getMeetings();
       setMeetings(fetchedMeetings);
     } catch (err) {
@@ -43,16 +82,37 @@ export const Dashboard: React.FC = () => {
     }
   };
 
+  const loadCalendar = async () => {
+    if (!user) return;
+    try {
+      const now = new Date();
+      const upcoming = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+      const events = await AISchedulerService.getCalendarEvents(now, upcoming);
+      setCalendarEvents(events?.map(event => ({ ...event, source: 'calendar' })) || []);
+    } catch (error) {
+      console.error('Error loading calendar events:', error);
+    }
+  };
+
   const handleMeetingCreated = (meeting: Meeting) => {
     setMeetings(prev => [meeting, ...prev]);
     setShowForm(false);
     notificationService.meetingCreated(meeting);
+    loadCalendar();
   };
 
   const handleMeetingUpdated = (updatedMeeting: Meeting, message: string = 'Meeting details have been updated') => {
     setMeetings(prev => prev.map(m => m.id === updatedMeeting.id ? updatedMeeting : m));
     setCurrentTime(new Date());
     notificationService.meetingUpdated(updatedMeeting, message);
+    loadCalendar();
+    if (updatedMeeting.metadata?.poll_id) {
+      setPollSummaries(prev => {
+        const next = { ...prev };
+        delete next[updatedMeeting.metadata!.poll_id as string];
+        return next;
+      });
+    }
   };
 
   const handleMeetingDeleted = async (meetingId: string) => {
@@ -62,7 +122,15 @@ export const Dashboard: React.FC = () => {
       setMeetings(prev => prev.filter(m => m.id !== meetingId));
       if (meetingToDelete) {
         notificationService.meetingDeleted(meetingToDelete.title);
+        if (meetingToDelete.metadata?.poll_id) {
+          setPollSummaries(prev => {
+            const next = { ...prev };
+            delete next[meetingToDelete.metadata!.poll_id as string];
+            return next;
+          });
+        }
       }
+      await loadCalendar();
     } catch (error) {
       console.error('Error deleting meeting:', error);
       const errorMessage = 'Failed to delete meeting. Please try again.';
@@ -70,17 +138,54 @@ export const Dashboard: React.FC = () => {
     }
   };
 
-  const totalParticipants = meetings.reduce((total, meeting) => total + meeting.participants.length, 0);
   const upcomingMeetings = meetings.filter(m => m.startTime > currentTime).length;
   const runningMeetings = meetings.filter((m: Meeting) => m.startTime <= currentTime && m.endTime > currentTime).length;
 
-  if (isLoading) {
+  const meetingGoogleEventIds = useMemo(
+    () =>
+      meetings
+        .map((meeting) => meeting.metadata?.google_event_id)
+        .filter((id): id is string => Boolean(id)),
+    [meetings]
+  );
+
+  const filteredCalendarEvents = useMemo(() => {
+    if (meetingGoogleEventIds.length === 0) {
+      return calendarEvents;
+    }
+    const idSet = new Set(meetingGoogleEventIds);
+    return calendarEvents.filter((event) => {
+      const eventId: string | undefined = event.id || event.eventId;
+      if (!eventId) return true;
+      return !idSet.has(eventId);
+    });
+  }, [calendarEvents, meetingGoogleEventIds]);
+
+  if (authLoading || (isLoading && user)) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
           <p className="text-gray-600">Loading meetings...</p>
         </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center text-center px-4">
+        <Calendar className="h-12 w-12 text-blue-600 mb-4" />
+        <h1 className="text-3xl font-bold text-gray-900 mb-2">Welcome to Meeting Scheduler</h1>
+        <p className="text-gray-600 mb-6 max-w-xl">
+          Connect your Google account to view your calendar, coordinate with teammates, and create polls when schedules conflict.
+        </p>
+        <button
+          onClick={loginWithGoogle}
+          className="px-6 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+        >
+          Sign in with Google
+        </button>
       </div>
     );
   }
@@ -93,17 +198,36 @@ export const Dashboard: React.FC = () => {
           <div className="flex justify-between items-center py-6">
             <div className="flex items-center">
               <Calendar className="h-8 w-8 text-blue-600 mr-3" />
-              <h1 className="text-2xl font-bold text-gray-900">AI Meeting Scheduler</h1>
+              <h1 className="text-2xl font-bold text-gray-900">Meeting Scheduler</h1>
             </div>
             <div className="flex items-center space-x-4">
+              {user && (
+                <div className="hidden sm:flex items-center space-x-2 pr-4 border-r border-gray-200">
+                  {user.picture ? (
+                    <img src={user.picture} alt={user.name} className="h-8 w-8 rounded-full object-cover" />
+                  ) : (
+                    <div className="h-8 w-8 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-sm font-semibold">
+                      {user.name?.charAt(0) || user.email?.charAt(0)}
+                    </div>
+                  )}
+                  <div className="text-left">
+                    <p className="text-sm font-medium text-gray-900">{user.name}</p>
+                    <p className="text-xs text-gray-500">{user.email}</p>
+                  </div>
+                </div>
+              )}
               <button
-                onClick={() => AISchedulerService.connectGoogle()}
-                className="flex items-center px-3 py-2 text-green-700 bg-green-100 hover:bg-green-200 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
+                onClick={logout}
+                className="flex items-center px-3 py-2 text-gray-600 hover:text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-md"
               >
-                Connect Google Calendar
+                <LogOut className="h-5 w-5 mr-2" />
+                Sign out
               </button>
               <button
-                onClick={loadMeetings}
+                onClick={() => {
+                  loadMeetings();
+                  loadCalendar();
+                }}
                 className="flex items-center px-3 py-2 text-gray-600 hover:text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-md"
               >
                 <Clock className="h-5 w-5 mr-2" />
@@ -184,14 +308,26 @@ export const Dashboard: React.FC = () => {
 
         {/* Main Content */}
         <div className="space-y-8">
-          <MeetingList
-            meetings={meetings}
-            onMeetingUpdated={(m, message) => {
-              handleMeetingUpdated(m, message);
-            }}
-            onMeetingDeleted={handleMeetingDeleted}
-            onEditMeeting={setEditMeeting}
+          <CalendarView
+            events={[
+              ...meetings.map((meeting) => ({
+                id: `meeting-${meeting.id}`,
+                summary: meeting.title,
+                start: { dateTime: meeting.startTime.toISOString() },
+                end: { dateTime: meeting.endTime.toISOString() },
+                location:
+                  meeting.metadata?.location_type === 'onsite'
+                    ? meeting.metadata?.room_location || meeting.metadata?.room_name
+                    : meeting.metadata?.meeting_url,
+                meeting,
+                source: 'meeting',
+              })),
+              ...filteredCalendarEvents,
+            ]}
             currentTime={currentTime}
+            pollSummaries={pollSummaries}
+            onEditMeeting={setEditMeeting}
+            onDeleteMeeting={(meeting) => handleMeetingDeleted(meeting.id)}
           />
         </div>
 

@@ -7,6 +7,7 @@ export interface Notification {
   message: string;
   timestamp: Date;
   read: boolean;
+  autoDismissMs?: number;
   action?: {
     label: string;
     onClick: () => void;
@@ -24,6 +25,14 @@ export interface MeetingNotification {
 class NotificationService {
   private notifications: Notification[] = [];
   private listeners: ((notifications: Notification[]) => void)[] = [];
+  private autoDismissTimers: Map<string, number> = new Map();
+
+  private readonly defaultDurations: Record<Notification['type'], number> = {
+    success: 5000,
+    info: 5000,
+    warning: 5000,
+    error: 5000,
+  };
 
   // Add a notification
   addNotification(notification: Omit<Notification, 'id' | 'timestamp' | 'read'>): string {
@@ -38,11 +47,13 @@ class NotificationService {
     this.notifications.unshift(newNotification);
     this.notifyListeners();
     
-    // Auto-remove success notifications after 5 seconds
-    if (notification.type === 'success') {
-      setTimeout(() => {
+    const dismissAfter = notification.autoDismissMs ?? this.defaultDurations[notification.type];
+    if (dismissAfter > 0) {
+      const timerId = window.setTimeout(() => {
         this.removeNotification(id);
-      }, 5000);
+        this.autoDismissTimers.delete(id);
+      }, dismissAfter);
+      this.autoDismissTimers.set(id, timerId);
     }
 
     return id;
@@ -50,6 +61,11 @@ class NotificationService {
 
   // Remove a notification
   removeNotification(id: string): void {
+    const timerId = this.autoDismissTimers.get(id);
+    if (timerId) {
+      clearTimeout(timerId);
+      this.autoDismissTimers.delete(id);
+    }
     this.notifications = this.notifications.filter(n => n.id !== id);
     this.notifyListeners();
   }
@@ -59,6 +75,11 @@ class NotificationService {
     const notification = this.notifications.find(n => n.id === id);
     if (notification) {
       notification.read = true;
+      const timerId = this.autoDismissTimers.get(id);
+      if (timerId) {
+        clearTimeout(timerId);
+        this.autoDismissTimers.delete(id);
+      }
       this.notifyListeners();
     }
   }
@@ -211,12 +232,23 @@ class NotificationService {
 
   // Clear all notifications
   clearAll(): void {
+    this.autoDismissTimers.forEach(timerId => clearTimeout(timerId));
+    this.autoDismissTimers.clear();
     this.notifications = [];
     this.notifyListeners();
   }
 
   // Clear notifications by type
   clearByType(type: Notification['type']): void {
+    this.notifications
+      .filter(n => n.type === type)
+      .forEach(n => {
+        const timerId = this.autoDismissTimers.get(n.id);
+        if (timerId) {
+          clearTimeout(timerId);
+          this.autoDismissTimers.delete(n.id);
+        }
+      });
     this.notifications = this.notifications.filter(n => n.type !== type);
     this.notifyListeners();
   }
