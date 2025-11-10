@@ -1,19 +1,20 @@
 import React, { useMemo } from 'react';
-import { format } from 'date-fns';
 import { Calendar, Clock, MapPin, Video, Mail, ExternalLink, Pencil } from 'lucide-react';
 import { Meeting, Poll } from '../types';
+import {
+  formatFriendlyDateTime,
+  formatFullRange,
+  formatMonthDayTime,
+  formatTimeOnly,
+  getMeetingTimeZone,
+  getTimeZoneAbbreviation,
+} from '../utils/timezone';
 
 interface MeetingDetailsProps {
   meeting: Meeting;
   pollSummary?: Poll | null;
   onEdit?: (meeting: Meeting) => void;
 }
-
-const formatRange = (start: Date, end: Date, timezone: string) => {
-  const startLabel = format(start, 'EEE, MMM d · h:mm a');
-  const endLabel = format(end, 'h:mm a');
-  return `${startLabel} – ${endLabel} (${timezone})`;
-};
 
 const avatarColors = [
   'from-blue-100 to-blue-200 text-blue-700',
@@ -23,7 +24,7 @@ const avatarColors = [
 ];
 
 export const MeetingDetails: React.FC<MeetingDetailsProps> = ({ meeting, pollSummary, onEdit }) => {
-  const timezone = useMemo(() => Intl.DateTimeFormat().resolvedOptions().timeZone, []);
+  const timezone = useMemo(() => getMeetingTimeZone(meeting), [meeting]);
   const locationType = (meeting.metadata?.location_type as 'online' | 'onsite') || 'online';
   const meetingUrl = meeting.metadata?.meeting_url;
   const pollId = meeting.metadata?.poll_id as string | undefined;
@@ -85,7 +86,7 @@ export const MeetingDetails: React.FC<MeetingDetailsProps> = ({ meeting, pollSum
         <div className="rounded-xl border border-gray-100 p-4 bg-gray-50 space-y-3">
           <div className="flex items-center gap-2 text-sm text-gray-600">
             <Clock className="h-4 w-4 text-blue-500" />
-            <span>{formatRange(meeting.startTime, meeting.endTime, timezone)}</span>
+            <span>{formatFullRange(meeting.startTime, meeting.endTime, timezone)}</span>
           </div>
           <div className="flex items-center gap-2 text-sm text-gray-600">
             {locationType === 'online' ? (
@@ -120,9 +121,12 @@ export const MeetingDetails: React.FC<MeetingDetailsProps> = ({ meeting, pollSum
         <div className="rounded-xl border border-gray-100 p-4 space-y-2">
           <div className="flex items-center gap-2 text-sm text-gray-600">
             <Calendar className="h-4 w-4 text-blue-500" />
-            <span>Created {format(meeting.createdAt, 'MMM d, yyyy · h:mm a')}</span>
+            <span>
+              Created {formatFriendlyDateTime(meeting.createdAt, timezone)} (
+              {getTimeZoneAbbreviation(meeting.createdAt, timezone)})
+            </span>
           </div>
-          <div className="flex items-center gap-2 text-sm text-gray-600">
+        <div className="flex items-center gap-2 text-sm text-gray-600">
             <Mail className="h-4 w-4 text-blue-500" />
             <span>Organizer: {meeting.organizerEmail || 'You'}</span>
           </div>
@@ -155,28 +159,28 @@ export const MeetingDetails: React.FC<MeetingDetailsProps> = ({ meeting, pollSum
           {pollOptions.length > 0 && (
             <div className="space-y-2 text-sm text-purple-900">
               {pollOptions.slice(0, 4).map((option) => {
-                const start = new Date(option.start_time);
-                const end = new Date(option.end_time);
-                const isWinner = pollSummary?.winning_option_id === option.id;
-                return (
-                  <div
-                    key={option.id}
-                    className={`flex items-center justify-between rounded-lg px-3 py-2 ${
-                      isWinner ? 'bg-white shadow border border-purple-200' : 'bg-purple-100'
-                    }`}
-                  >
-                    <div>
-                      <p className="font-medium">
-                        {format(start, 'MMM d · h:mm a')} – {format(end, 'h:mm a')}
-                      </p>
-                      <p className="text-xs text-purple-600">{option.votes} votes</p>
+                  const start = new Date(option.start_time);
+                  const end = new Date(option.end_time);
+                  const isWinner = pollSummary?.winning_option_id === option.id;
+                  return (
+                    <div
+                      key={option.id}
+                      className={`flex items-center justify-between rounded-lg px-3 py-2 ${
+                        isWinner ? 'bg-white shadow border border-purple-200' : 'bg-purple-100'
+                      }`}
+                    >
+                      <div>
+                        <p className="font-medium">
+                          {formatMonthDayTime(start, timezone)} – {formatTimeOnly(end, timezone)}
+                        </p>
+                        <p className="text-xs text-purple-600">{option.votes} votes</p>
+                      </div>
+                      {isWinner && (
+                        <span className="text-xs font-semibold text-green-700">Chosen slot</span>
+                      )}
                     </div>
-                    {isWinner && (
-                      <span className="text-xs font-semibold text-green-700">Chosen slot</span>
-                    )}
-                  </div>
-                );
-              })}
+                  );
+                })}
               {pollOptions.length > 4 && (
                 <p className="text-xs text-purple-700">+{pollOptions.length - 4} additional options</p>
               )}

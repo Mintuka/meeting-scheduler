@@ -4,6 +4,12 @@ import { Calendar, Loader2, Save, Plus, X, MapPin, RefreshCw, AlertCircle } from
 import { Meeting, Room, RoomAvailability } from '../types';
 import { AISchedulerService } from '../services/AISchedulerService';
 import { notificationService } from '../services/NotificationService';
+import {
+  buildDateTimeInTimeZone,
+  formatDateInputValue,
+  formatTimeInputValue,
+  getMeetingTimeZone,
+} from '../utils/timezone';
 
 interface EditMeetingFormProps {
   meeting: Meeting;
@@ -21,16 +27,6 @@ interface EditFormData {
   roomId?: string;
 }
 
-const buildDateTime = (dateStr?: string, timeStr?: string) => {
-  if (!dateStr || !timeStr) return null;
-  const [year, month, day] = dateStr.split('-').map(Number);
-  const [hour, minute] = timeStr.split(':').map(Number);
-  if ([year, month, day, hour, minute].some((value) => Number.isNaN(value))) {
-    return null;
-  }
-  return new Date(year, month - 1, day, hour, minute, 0, 0);
-};
-
 export const EditMeetingForm: React.FC<EditMeetingFormProps> = ({ meeting, onClose, onUpdated }) => {
   const [isSaving, setIsSaving] = useState(false);
   const [participants, setParticipants] = useState<string[]>(meeting.participants.map(p => p.email));
@@ -42,6 +38,7 @@ export const EditMeetingForm: React.FC<EditMeetingFormProps> = ({ meeting, onClo
   const [roomAvailability, setRoomAvailability] = useState<RoomAvailability[]>([]);
   const [roomAvailabilityLoading, setRoomAvailabilityLoading] = useState(false);
   const [roomAvailabilityError, setRoomAvailabilityError] = useState<string | null>(null);
+  const meetingTimezone = useMemo(() => getMeetingTimeZone(meeting), [meeting]);
   const initialLocationType: 'online' | 'onsite' =
     (meeting.metadata?.location_type as 'online' | 'onsite') || (meeting.metadata?.room_id ? 'onsite' : 'online');
   const initialRoomId = meeting.metadata?.room_id || '';
@@ -84,13 +81,13 @@ export const EditMeetingForm: React.FC<EditMeetingFormProps> = ({ meeting, onClo
     });
   }, [rooms, roomAvailability]);
   const computeMeetingTimes = useCallback(() => {
-    const start = buildDateTime(watchPreferredDate, watchStartTime);
-    const end = buildDateTime(watchPreferredDate, watchEndTime);
+    const start = buildDateTimeInTimeZone(watchPreferredDate, watchStartTime, meetingTimezone);
+    const end = buildDateTimeInTimeZone(watchPreferredDate, watchEndTime, meetingTimezone);
     if (!start || !end || end <= start) {
       return null;
     }
     return { start, end };
-  }, [watchPreferredDate, watchStartTime, watchEndTime]);
+  }, [watchPreferredDate, watchStartTime, watchEndTime, meetingTimezone]);
 
   const fetchRooms = useCallback(async () => {
     setRoomsLoading(true);
@@ -131,22 +128,15 @@ export const EditMeetingForm: React.FC<EditMeetingFormProps> = ({ meeting, onClo
   }, [watchLocationType, computeMeetingTimes, meeting.id]);
 
   useEffect(() => {
-    const d = new Date(meeting.startTime);
-    const end = new Date(meeting.endTime);
-    const yyyy = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, '0');
-    const dd = String(d.getDate()).padStart(2, '0');
-    const hh = String(d.getHours()).padStart(2, '0');
-    const mi = String(d.getMinutes()).padStart(2, '0');
-    const eh = String(end.getHours()).padStart(2, '0');
-    const emi = String(end.getMinutes()).padStart(2, '0');
-
+    const startDateInput = formatDateInputValue(meeting.startTime, meetingTimezone);
+    const startTimeInput = formatTimeInputValue(meeting.startTime, meetingTimezone);
+    const endTimeInput = formatTimeInputValue(meeting.endTime, meetingTimezone);
     reset({
       title: meeting.title,
       description: meeting.description,
-      preferredDate: `${yyyy}-${mm}-${dd}`,
-      startTime: `${hh}:${mi}`,
-      endTime: `${eh}:${emi}`,
+      preferredDate: startDateInput,
+      startTime: startTimeInput,
+      endTime: endTimeInput,
       locationType:
         (meeting.metadata?.location_type as 'online' | 'onsite') ||
         (meeting.metadata?.room_id ? 'onsite' : 'online'),
@@ -157,7 +147,7 @@ export const EditMeetingForm: React.FC<EditMeetingFormProps> = ({ meeting, onClo
     const emails = meeting.participants.map(p => p.email);
     setParticipants(emails);
     initialParticipantsRef.current = emails;
-  }, [meeting, reset]);
+  }, [meeting, meetingTimezone, reset]);
 
   useEffect(() => {
     fetchRooms();
@@ -194,11 +184,13 @@ export const EditMeetingForm: React.FC<EditMeetingFormProps> = ({ meeting, onClo
     setIsSaving(true);
     try {
       // Construct new start/end
-      const [year, month, day] = data.preferredDate.split('-').map(Number);
-      const [sh, sm] = data.startTime.split(':').map(Number);
-      const [eh, em] = data.endTime.split(':').map(Number);
-      const start = new Date(year, month - 1, day, sh, sm, 0, 0);
-      const end = new Date(year, month - 1, day, eh, em, 0, 0);
+      const start = buildDateTimeInTimeZone(data.preferredDate, data.startTime, meetingTimezone);
+      const end = buildDateTimeInTimeZone(data.preferredDate, data.endTime, meetingTimezone);
+      if (!start || !end) {
+        notificationService.error('Time missing', 'Unable to determine meeting start/end time.');
+        setIsSaving(false);
+        return;
+      }
       if (end <= start) {
         setError('endTime', { type: 'validate', message: 'End time must be after start time' });
         setIsSaving(false);
@@ -220,6 +212,8 @@ export const EditMeetingForm: React.FC<EditMeetingFormProps> = ({ meeting, onClo
         ...(meeting.metadata || {}),
         location_type: data.locationType,
       };
+      updatedMetadata.requested_timezone = meetingTimezone;
+      updatedMetadata.timezone = meetingTimezone;
       if (data.locationType === 'onsite' && data.roomId) {
         updatedMetadata.room_id = data.roomId;
       } else {
@@ -295,6 +289,7 @@ export const EditMeetingForm: React.FC<EditMeetingFormProps> = ({ meeting, onClo
           <p className="mt-1 text-xs text-gray-500">End time must be after start time and at least 5 minutes later</p>
         </div>
       </div>
+      <p className="text-xs text-gray-500">Times shown in {meetingTimezone}</p>
 
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-2">Location</label>

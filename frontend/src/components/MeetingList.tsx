@@ -1,9 +1,14 @@
 import React, { useState } from 'react';
-import { format } from 'date-fns';
 import { Calendar, Clock, Users, Mail, Edit, Trash2, RefreshCw, Bell, MapPin, Video, ListChecks } from 'lucide-react';
 import { Meeting } from '../types';
 import { AISchedulerService } from '../services/AISchedulerService';
 import { notificationService } from '../services/NotificationService';
+import {
+  formatDateOnly,
+  formatTimeOnly,
+  getMeetingTimeZone,
+  getTimeZoneAbbreviation,
+} from '../utils/timezone';
 
 interface MeetingListProps {
   meetings: Meeting[];
@@ -115,8 +120,11 @@ export const MeetingList: React.FC<MeetingListProps> = ({
           ? 'Link ready'
           : 'Link shared via invitation';
         const pollId = meeting.metadata?.poll_id;
-        const startLabel = meeting.startTime.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
-        const endLabel = meeting.endTime.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
+        const meetingTimeZone = getMeetingTimeZone(meeting);
+        const dateLabel = formatDateOnly(meeting.startTime, meetingTimeZone);
+        const startLabel = formatTimeOnly(meeting.startTime, meetingTimeZone);
+        const endLabel = formatTimeOnly(meeting.endTime, meetingTimeZone);
+        const tzAbbrev = getTimeZoneAbbreviation(meeting.startTime, meetingTimeZone);
         const isPolling = Boolean(meeting.metadata?.poll_pending) || effectiveStatus === 'polling';
         return (
         <div key={meeting.id} className="bg-white rounded-lg shadow-md p-6 border border-gray-200">
@@ -191,12 +199,12 @@ export const MeetingList: React.FC<MeetingListProps> = ({
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
             <div className="flex items-center text-sm text-gray-600">
               <Calendar className="h-4 w-4 mr-2" />
-              <span>{format(meeting.startTime, 'MMM dd, yyyy')}</span>
+              <span>{dateLabel}</span>
             </div>
             <div className="flex items-center text-sm text-gray-600">
               <Clock className="h-4 w-4 mr-2" />
               <span>
-                {startLabel} - {endLabel}
+                {startLabel} – {endLabel} ({tzAbbrev})
               </span>
             </div>
             <div className="flex items-center text-sm text-gray-600">

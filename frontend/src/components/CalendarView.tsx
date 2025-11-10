@@ -7,6 +7,13 @@ import {
   startOfWeek,
 } from 'date-fns';
 import { Meeting, Poll } from '../types';
+import {
+  formatFriendlyDateTime,
+  formatMonthDayTime,
+  formatTimeOnly,
+  getMeetingTimeZone,
+  getTimeZoneAbbreviation,
+} from '../utils/timezone';
 
 interface CalendarViewProps {
   events: any[];
@@ -149,6 +156,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
     }
 
     const status = computeMeetingStatus(meeting);
+    const meetingTimeZone = getMeetingTimeZone(meeting);
     const locationType = (meeting.metadata?.location_type as 'online' | 'onsite') || 'online';
     const locationLabel =
       locationType === 'onsite'
@@ -204,8 +212,9 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div>
             <p className="font-semibold text-gray-900 text-base">{meeting.title}</p>
-            <p className="text-sm text-gray-600">
-              {format(meeting.startTime, 'EEE, MMM d · h:mm a')} – {format(meeting.endTime, 'h:mm a')}
+            <p className="text-sm text-gray-600 flex items-center gap-1 flex-wrap">
+              {formatFriendlyDateTime(meeting.startTime, meetingTimeZone)} – {formatTimeOnly(meeting.endTime, meetingTimeZone)}
+              <span className="text-xs text-gray-500">({getTimeZoneAbbreviation(meeting.startTime, meetingTimeZone)})</span>
             </p>
           </div>
           {renderStatusBadge(status)}
@@ -272,7 +281,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
                   return (
                     <div key={option.id} className="flex items-center justify-between w-full">
                       <span>
-                        {format(start, 'MMM d · h:mm a')} – {format(end, 'h:mm a')}
+                        {formatMonthDayTime(start, meetingTimeZone)} – {formatTimeOnly(end, meetingTimeZone)}
                       </span>
                       <span className={`font-semibold ${isWinner ? 'text-green-700' : ''}`}>
                         {option.votes} votes{isWinner ? ' · chosen' : ''}

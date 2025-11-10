@@ -16,6 +16,15 @@ import {
 import { AvailabilitySuggestion, MeetingFormData, Meeting, Room, RoomAvailability, Poll } from '../types';
 import { AISchedulerService } from '../services/AISchedulerService';
 import { notificationService } from '../services/NotificationService';
+import {
+  buildDateTimeInTimeZone,
+  formatDateInputValue,
+  formatMonthDayTime,
+  formatTimeInputValue,
+  formatTimeOnly,
+  getBrowserTimeZone,
+  getTimeZoneAbbreviation,
+} from '../utils/timezone';
 
 interface MeetingCreationMeta {
   isPollOnly: boolean;
@@ -26,29 +35,6 @@ interface MeetingCreationMeta {
 interface MeetingFormProps {
   onMeetingCreated: (meeting: Meeting, meta: MeetingCreationMeta) => void;
 }
-
-const formatDateInput = (date: Date) => {
-  const yyyy = date.getFullYear();
-  const mm = String(date.getMonth() + 1).padStart(2, '0');
-  const dd = String(date.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
-};
-
-const formatTimeInput = (date: Date) => {
-  const hh = String(date.getHours()).padStart(2, '0');
-  const mm = String(date.getMinutes()).padStart(2, '0');
-  return `${hh}:${mm}`;
-};
-
-const buildDateTime = (dateStr?: string, timeStr?: string) => {
-  if (!dateStr || !timeStr) return null;
-  const [year, month, day] = dateStr.split('-').map(Number);
-  const [hour, minute] = timeStr.split(':').map(Number);
-  if ([year, month, day, hour, minute].some((v) => Number.isNaN(v))) {
-    return null;
-  }
-  return new Date(year, month - 1, day, hour, minute, 0, 0);
-};
 
 const computeDefaultPollDeadline = () => {
   const tomorrow = new Date();
@@ -78,7 +64,7 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
   const [hasChosenTime, setHasChosenTime] = useState(false);
   const [manualTimeMode, setManualTimeMode] = useState(false);
   const [selectedSuggestionId, setSelectedSuggestionId] = useState<string | null>(null);
-  const timezone = useMemo(() => Intl.DateTimeFormat().resolvedOptions().timeZone, []);
+  const timezone = useMemo(() => getBrowserTimeZone(), []);
   const [justAddedPollOptionId, setJustAddedPollOptionId] = useState<string | null>(null);
   const canShowFinalize = manualTimeMode || hasChosenTime;
   const shouldShowPollBuilder = hasGeneratedSuggestions && !manualTimeMode && !hasChosenTime;
@@ -136,13 +122,13 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
   const prevResetKeyRef = useRef(resetKey);
 
   const computeMeetingTimes = useCallback(() => {
-    const start = buildDateTime(watchPreferredDate, watchStartTime);
-    const end = buildDateTime(watchPreferredDate, watchEndTime);
+    const start = buildDateTimeInTimeZone(watchPreferredDate, watchStartTime, timezone);
+    const end = buildDateTimeInTimeZone(watchPreferredDate, watchEndTime, timezone);
     if (!start || !end || end <= start) {
       return null;
     }
     return { start, end };
-  }, [watchPreferredDate, watchStartTime, watchEndTime]);
+  }, [watchPreferredDate, watchStartTime, watchEndTime, timezone]);
 
   const addParticipant = () => {
     if (newParticipant && !participants.includes(newParticipant)) {
@@ -200,8 +186,8 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
       notificationService.warning('No Participants', 'Please add at least one participant');
       return;
     }
-    let startTime = buildDateTime(data.preferredDate, data.startTime);
-    let endTime = buildDateTime(data.preferredDate, data.endTime);
+    let startTime = buildDateTimeInTimeZone(data.preferredDate, data.startTime, timezone);
+    let endTime = buildDateTimeInTimeZone(data.preferredDate, data.endTime, timezone);
     const now = new Date();
 
     if (!isPollOnly) {
@@ -244,9 +230,9 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
       return;
     }
 
-    const overridePreferredDate = formatDateInput(startTime);
-    const overrideStart = formatTimeInput(startTime);
-    const overrideEnd = formatTimeInput(endTime);
+    const overridePreferredDate = formatDateInputValue(startTime, timezone);
+    const overrideStart = formatTimeInputValue(startTime, timezone);
+    const overrideEnd = formatTimeInputValue(endTime, timezone);
 
     setIsLoading(true);
     try {
@@ -323,10 +309,13 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
       setError('durationMinutes', { type: 'validate', message: 'Duration must be at least 5 minutes' });
       return;
     }
-    const [year, month, day] = watchPreferredDate.split('-').map(Number);
-    const windowStart = new Date(year, month - 1, day, 0, 0, 0, 0);
-    const windowEnd = new Date(windowStart.getTime() + 24 * 60 * 60 * 1000);
+    const windowStart = buildDateTimeInTimeZone(watchPreferredDate, '00:00', timezone);
+    const windowEnd = windowStart ? new Date(windowStart.getTime() + 24 * 60 * 60 * 1000) : null;
     const now = new Date();
+    if (!windowStart || !windowEnd) {
+      notificationService.warning('Preferred date required', 'Pick a preferred date to suggest times.');
+      return;
+    }
     if (windowEnd <= now) {
       notificationService.warning('Past date', 'Suggestions must be requested for today or a future date.');
       return;
@@ -383,9 +372,9 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
     }
     const startDate = new Date(slot.start);
     const endDate = new Date(slot.end);
-    setValue('preferredDate', formatDateInput(startDate));
-    setValue('startTime', formatTimeInput(startDate));
-    setValue('endTime', formatTimeInput(endDate));
+    setValue('preferredDate', formatDateInputValue(startDate, timezone));
+    setValue('startTime', formatTimeInputValue(startDate, timezone));
+    setValue('endTime', formatTimeInputValue(endDate, timezone));
     setSelectedSuggestionId(slot.start);
     setHasChosenTime(true);
     setManualTimeMode(false);
@@ -704,7 +693,8 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
                   {suggestions.map((slot) => {
                       const start = new Date(slot.start);
                       const end = new Date(slot.end);
-                const label = `${start.toLocaleString(undefined, { timeZoneName: 'short' })} → ${end.toLocaleTimeString(undefined, { timeZoneName: 'short' })}`;
+                const tzAbbrev = getTimeZoneAbbreviation(start, timezone);
+                const label = `${formatMonthDayTime(start, timezone)} → ${formatTimeOnly(end, timezone)} (${tzAbbrev})`;
                 const slotKey = slot.start;
                 const isSelected = selectedSuggestionId === slot.start;
                 const isInPoll = selectedPollOptions.some(option => option.start === slot.start && option.end === slot.end);
@@ -775,7 +765,9 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
                 <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
                   {selectedPollOptions.map((slot) => (
                     <div key={slot.start} className="flex items-center justify-between text-sm bg-white rounded-md px-3 py-2 shadow-sm">
-                      <span>{new Date(slot.start).toLocaleString()} - {new Date(slot.end).toLocaleTimeString()}</span>
+                      <span>
+                        {formatMonthDayTime(new Date(slot.start), timezone)} – {formatTimeOnly(new Date(slot.end), timezone)}
+                      </span>
                       <button
                         type="button"
                         className="text-red-500 hover:text-red-700"

@@ -1,4 +1,5 @@
 import { Meeting, MeetingFormData, AvailabilitySuggestion, Poll, Room, RoomAvailability } from '../types';
+import { buildDateTimeInTimeZone, getBrowserTimeZone } from '../utils/timezone';
 
 declare global {
   namespace NodeJS {
@@ -138,18 +139,14 @@ export class AISchedulerService {
   }
 
   static async createMeeting(formData: MeetingFormData): Promise<Meeting> {
-    const [year, month, day] = formData.preferredDate.split('-').map(Number);
-    const meetingDate = new Date(year, month - 1, day);
-    const startTime = new Date(meetingDate.getFullYear(), meetingDate.getMonth(), meetingDate.getDate());
-    const [startHour, startMinute] = formData.startTime.split(':').map(Number);
-    startTime.setHours(startHour, startMinute, 0, 0);
+    const resolvedTZ = formData.clientTimezone || getBrowserTimeZone();
+    const startTime = buildDateTimeInTimeZone(formData.preferredDate, formData.startTime, resolvedTZ);
+    const endTime = buildDateTimeInTimeZone(formData.preferredDate, formData.endTime, resolvedTZ);
+    const preferredDateTime = buildDateTimeInTimeZone(formData.preferredDate, '00:00', resolvedTZ);
 
-    const endTime = new Date(meetingDate.getFullYear(), meetingDate.getMonth(), meetingDate.getDate());
-    const [endHour, endMinute] = formData.endTime.split(':').map(Number);
-    endTime.setHours(endHour, endMinute, 0, 0);
-
-    const [prefYear, prefMonth, prefDay] = formData.preferredDate.split('-').map(Number);
-    const preferredDateTime = new Date(prefYear, prefMonth - 1, prefDay, 0, 0, 0, 0);
+    if (!startTime || !endTime || !preferredDateTime) {
+      throw new Error('Invalid date or time selection.');
+    }
 
     const metadata: Record<string, any> = {
       preferred_time_slots: formData.preferredTimeSlots?.map(slot => ({
@@ -163,9 +160,8 @@ export class AISchedulerService {
     if (formData.locationType === 'onsite' && formData.roomId) {
       metadata.room_id = formData.roomId;
     }
-    if (formData.clientTimezone) {
-      metadata.requested_timezone = formData.clientTimezone;
-    }
+    metadata.requested_timezone = resolvedTZ;
+    metadata.timezone = resolvedTZ;
     metadata.manual_time_mode = Boolean(formData.manualTimeMode);
     if (formData.pollPending) {
       metadata.poll_pending = true;
