@@ -1,14 +1,17 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorCollection
 from pymongo import ReturnDocument
 import uuid
+import logging
 from .database import get_meetings_collection, get_metadata_collection, get_users_collection, get_polls_collection
 from .meet_link import generate_google_meet_link
 from .google_calendar import create_event_with_meet
 from .models import Meeting, MeetingCreate, MeetingUpdate, Metadata, User, Poll, PollOption, PollVote
 from .rooms_catalog import ROOMS_CATALOG, get_room_by_id
+
+logger = logging.getLogger(__name__)
 
 class MeetingService:
     def __init__(self):
@@ -509,6 +512,14 @@ class PollService:
     def __init__(self):
         self.collection: AsyncIOMotorCollection = get_polls_collection()
 
+    @staticmethod
+    def _ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
     async def create_poll(
         self,
         meeting_id: str,
@@ -522,7 +533,7 @@ class PollService:
             "options": [PollOption(**opt).model_dump() for opt in options],
             "votes": [],
             "status": "open",
-            "deadline": deadline,
+            "deadline": self._ensure_utc(deadline),
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow(),
         }
@@ -545,6 +556,11 @@ class PollService:
             return None
         if poll.status != "open":
             raise ValueError("Poll is closed")
+        normalized_deadline = self._ensure_utc(poll.deadline)
+        if normalized_deadline and datetime.now(timezone.utc) >= normalized_deadline:
+            raise ValueError("Poll deadline has passed")
+        if normalized_deadline and poll.deadline != normalized_deadline:
+            poll.deadline = normalized_deadline
 
         # Remove any existing vote from this voter
         poll.votes = [vote for vote in poll.votes if vote.voter_email.lower() != voter_email.lower()]
@@ -589,3 +605,22 @@ class PollService:
             {"$set": poll.model_dump()}
         )
         return poll
+
+    async def finalize_expired_polls(self) -> List[Poll]:
+        """Automatically finalize polls whose deadlines have passed."""
+        now = datetime.now(timezone.utc)
+        query = {
+            "status": "open",
+            "deadline": {"$ne": None, "$lte": now},
+        }
+        finalized: List[Poll] = []
+        cursor = self.collection.find(query)
+        async for poll_doc in cursor:
+            poll = Poll(**poll_doc)
+            try:
+                finalized_poll = await self.finalize_poll(str(poll.id))
+                if finalized_poll:
+                    finalized.append(finalized_poll)
+            except Exception as exc:
+                logger.error("Auto finalization failed for poll %s: %s", poll.id, exc)
+        return finalized

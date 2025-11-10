@@ -4,12 +4,17 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.responses import RedirectResponse
 from contextlib import asynccontextmanager
+import asyncio
 import uvicorn
 from datetime import datetime
 import os
+import logging
 from typing import List, Optional, Dict, Any, Annotated
 from pydantic import BaseModel, Field
 import uuid
+import hashlib
+import hmac
+from urllib.parse import quote
 
 from app.database import MongoDB
 from app.models import Meeting, MeetingCreate, MeetingUpdate, Metadata, Room, RoomAvailability, User, Poll
@@ -25,7 +30,7 @@ from app.google_calendar import (
 import anyio
 from app.notification_service import notification_service
 from app.email_reply_listener import EmailReplyListener
-from app.auth import create_access_token, get_current_user_token
+from app.auth import create_access_token, get_current_user_token, get_optional_user_token
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
 from app.calendar_service import list_events as calendar_list_events, get_free_busy
@@ -33,6 +38,7 @@ from app.rooms_catalog import ROOMS_CATALOG
 from dateutil import parser as date_parser
 from datetime import timezone, timedelta
 from zoneinfo import ZoneInfo
+from jose import jwt, JWTError
 
 
 def _ensure_tz(dt: datetime) -> datetime:
@@ -96,6 +102,174 @@ DAYPART_BUCKETS = (
     ("evening", 17, 22),
 )
 QUIET_HOURS = (6, 22)  # inclusive start, exclusive end
+
+POLL_TOKEN_SECRET = os.getenv("POLL_TOKEN_SECRET") or os.getenv("JWT_SECRET_KEY") or "dev-poll-token-secret"
+POLL_TOKEN_SECRET_BYTES = POLL_TOKEN_SECRET.encode("utf-8")
+POLL_TOKEN_ALGORITHM = "HS256"
+POLL_TOKEN_TTL_HOURS = int(os.getenv("POLL_TOKEN_TTL_HOURS", str(24 * 7)))
+
+logger = logging.getLogger(__name__)
+
+
+def _poll_token_expiration(deadline: Optional[datetime]) -> datetime:
+    default_exp = datetime.now(timezone.utc) + timedelta(hours=POLL_TOKEN_TTL_HOURS)
+    if not deadline:
+        return default_exp
+    deadline_utc = _ensure_tz(deadline)
+    return min(default_exp, deadline_utc)
+
+
+def generate_poll_token(poll_id: str, email: str, deadline: Optional[datetime]) -> str:
+    exp = _poll_token_expiration(deadline)
+    payload = {
+        "poll_id": poll_id,
+        "email": email.lower(),
+        "exp": int(exp.timestamp()),
+    }
+    return jwt.encode(payload, POLL_TOKEN_SECRET, algorithm=POLL_TOKEN_ALGORITHM)
+
+
+def verify_poll_token(poll_id: str, token: str) -> Optional[str]:
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, POLL_TOKEN_SECRET, algorithms=[POLL_TOKEN_ALGORITHM])
+    except JWTError:
+        return None
+    if payload.get("poll_id") != poll_id:
+        return None
+    email = payload.get("email")
+    if not email:
+        return None
+    return str(email)
+
+
+def _legacy_poll_token_input(poll_id: str, email: str) -> bytes:
+    return f"{poll_id}:{email.lower()}".encode("utf-8")
+
+
+def verify_legacy_poll_token(poll_id: str, email: str, token: Optional[str]) -> bool:
+    if not token or not email:
+        return False
+    expected = hmac.new(POLL_TOKEN_SECRET_BYTES, _legacy_poll_token_input(poll_id, email), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, token)
+
+
+def _get_allowed_voter_emails(poll: Poll, meeting: Meeting) -> set[str]:
+    allowed = {participant.email.lower() for participant in meeting.participants}
+    if poll.organizer_email:
+        allowed.add(poll.organizer_email.lower())
+    return allowed
+
+
+def _resolve_voter_identity(
+    poll: Poll,
+    meeting: Meeting,
+    token: Optional[str],
+    voter_email_param: Optional[str],
+    current_user: Optional[User],
+    *,
+    require_identity: bool,
+) -> Optional[str]:
+    allowed_emails = _get_allowed_voter_emails(poll, meeting)
+    poll_id_str = str(poll.id)
+    token_email = verify_poll_token(poll_id_str, token) if token else None
+    if token and not token_email:
+        raise HTTPException(status_code=403, detail="Invalid or missing poll token.")
+
+    legacy_email = None
+    if not token_email and voter_email_param:
+        if verify_legacy_poll_token(poll_id_str, voter_email_param, token):
+            legacy_email = voter_email_param.lower()
+
+    user_email = current_user.email.lower() if current_user else None
+    if token_email and user_email and token_email != user_email:
+        raise HTTPException(
+            status_code=403,
+            detail="This poll link is tied to a different participant.",
+        )
+
+    candidate = token_email or user_email or legacy_email
+    if candidate and candidate not in allowed_emails:
+        if require_identity:
+            raise HTTPException(
+                status_code=403,
+                detail="Only invited participants may vote.",
+            )
+        candidate = None
+
+    if require_identity and not candidate:
+        raise HTTPException(
+            status_code=403,
+            detail="Sign in or use your personalized poll link to vote.",
+        )
+
+    return candidate
+
+
+async def _apply_poll_outcome(poll: Poll) -> Optional[Meeting]:
+    if meeting_service is None:
+        return None
+    meeting = await meeting_service.get_meeting(poll.meeting_id)
+    if not meeting:
+        return None
+    if poll.winning_option_id:
+        winning_option = next((opt for opt in poll.options if opt.id == poll.winning_option_id), None)
+        if winning_option:
+            update = MeetingUpdate(
+                start_time=winning_option.start_time,
+                end_time=winning_option.end_time,
+                status="scheduled",
+            )
+            updated_meeting = await meeting_service.update_meeting(poll.meeting_id, update)
+            meeting = updated_meeting or meeting
+            meta = dict(meeting.metadata or {})
+            if meta.pop("poll_pending", None):
+                updated_meta = await meeting_service.update_meeting_metadata(poll.meeting_id, meta)
+                meeting = updated_meta or meeting
+            for participant in meeting.participants:
+                await notification_service.send_poll_finalized(meeting, participant, winning_option)
+    return meeting
+
+
+class PollAutoFinalizer:
+    def __init__(self, poll_service: PollService, interval_seconds: int = 60):
+        self.poll_service = poll_service
+        self.interval_seconds = interval_seconds
+        self._task: Optional[asyncio.Task] = None
+
+    async def start(self):
+        if self._task:
+            return
+        loop = asyncio.get_running_loop()
+        self._task = loop.create_task(self._run())
+
+    async def stop(self):
+        if not self._task:
+            return
+        self._task.cancel()
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
+        self._task = None
+
+    async def _run(self):
+        while True:
+            try:
+                finalized_polls = await self.poll_service.finalize_expired_polls()
+                if finalized_polls:
+                    for poll in finalized_polls:
+                        try:
+                            await _apply_poll_outcome(poll)
+                        except Exception as exc:
+                            logger.error("Failed to apply poll outcome for %s: %s", poll.id, exc)
+                    logger.info("Auto-finalized %s polls after deadline", len(finalized_polls))
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.error("Poll auto-finalizer encountered an error: %s", exc)
+            await asyncio.sleep(self.interval_seconds)
 
 
 def _get_zone(tz_name: Optional[str]) -> ZoneInfo:
@@ -201,7 +375,8 @@ class CreatePollRequest(BaseModel):
 
 class VoteRequest(BaseModel):
     option_id: str
-    voter_email: str
+    token: Optional[str] = None
+    voter_email: Optional[str] = None
 
 
 class FinalizePollRequest(BaseModel):
@@ -213,6 +388,7 @@ class RoomsAvailabilityResponse(BaseModel):
 
 
 CurrentUser = Annotated[User, Depends(get_current_user_token)]
+OptionalCurrentUser = Annotated[Optional[User], Depends(get_optional_user_token)]
 
 
 def _ensure_meeting_owner(meeting: Meeting, current_user: CurrentUser) -> None:
@@ -225,6 +401,7 @@ meeting_service = None
 metadata_service = None
 user_service = None
 poll_service = None
+poll_auto_finalizer: Optional["PollAutoFinalizer"] = None
 
 async def process_email_reply(meeting_id: str, from_email: str, action: str, payload: str | None):
     # Basic placeholder actions: record metadata; real logic can update meetings
@@ -247,7 +424,7 @@ async def lifespan(app: FastAPI):
     await MongoDB.connect_to_mongo()
     
     # Initialize services after database connection
-    global meeting_service, metadata_service, user_service, poll_service
+    global meeting_service, metadata_service, user_service, poll_service, poll_auto_finalizer
     meeting_service = MeetingService()
     metadata_service = MetadataService()
     user_service = UserService()
@@ -255,11 +432,18 @@ async def lifespan(app: FastAPI):
     global reply_listener
     reply_listener = EmailReplyListener(process_email_reply)
     await reply_listener.start()
+    poll_auto_finalizer = PollAutoFinalizer(
+        poll_service,
+        interval_seconds=int(os.getenv("POLL_FINALIZER_INTERVAL_SECONDS", "60")),
+    )
+    await poll_auto_finalizer.start()
     
     yield
     print("Shutting down Meeting Scheduler Backend...")
     if reply_listener:
         await reply_listener.stop()
+    if poll_auto_finalizer:
+        await poll_auto_finalizer.stop()
     await MongoDB.close_mongo_connection()
 
 app = FastAPI(
@@ -902,43 +1086,79 @@ async def create_poll(meeting_id: str, request: CreatePollRequest, current_user:
         {"start_time": opt.start_time, "end_time": opt.end_time}
         for opt in request.options
     ]
+    normalized_deadline = _ensure_tz(request.deadline) if request.deadline else None
     poll = await poll_service.create_poll(
         meeting_id=meeting_id,
         organizer_email=current_user.email,
         options=options_payload,
-        deadline=request.deadline,
+        deadline=normalized_deadline,
     )
 
     meta = dict(meeting.metadata or {})
     meta["poll_id"] = str(poll.id)
     await meeting_service.update_meeting_metadata(meeting_id, meta)
 
-    poll_url = f"{os.getenv('FRONTEND_URL', 'http://localhost:3000')}/poll/{poll.id}"
+    poll_id_str = str(poll.id)
+    base_poll_url = f"{os.getenv('FRONTEND_URL', 'http://localhost:3000')}/poll/{poll_id_str}"
     for participant in meeting.participants:
-        await notification_service.send_poll_invitation(meeting, participant, poll_url)
+        token = generate_poll_token(poll_id_str, participant.email, poll.deadline)
+        participant_poll_url = f"{base_poll_url}?token={quote(token)}"
+        await notification_service.send_poll_invitation(meeting, participant, participant_poll_url)
 
     return poll
 
 
 @app.get("/api/polls/{poll_id}")
-async def get_poll(poll_id: str):
+async def get_poll(
+    poll_id: str,
+    token: Optional[str] = Query(default=None),
+    voter_email: Optional[str] = Query(default=None),
+    current_user: OptionalCurrentUser = None,
+):
     poll = await poll_service.get_poll(poll_id)
     if not poll:
         raise HTTPException(status_code=404, detail="Poll not found")
     meeting = await meeting_service.get_meeting(poll.meeting_id)
-    return _serialize_poll(poll, meeting)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found for poll")
+    viewer_email = _resolve_voter_identity(
+        poll,
+        meeting,
+        token,
+        voter_email,
+        current_user,
+        require_identity=False,
+    )
+    return _serialize_poll(poll, meeting, viewer_email)
 
 
 @app.post("/api/polls/{poll_id}/vote")
-async def vote_poll(poll_id: str, request: VoteRequest):
-    try:
-        poll = await poll_service.add_vote(poll_id, request.option_id, request.voter_email)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+async def vote_poll(poll_id: str, request: VoteRequest, current_user: OptionalCurrentUser = None):
+    poll = await poll_service.get_poll(poll_id)
     if not poll:
         raise HTTPException(status_code=404, detail="Poll not found")
+
     meeting = await meeting_service.get_meeting(poll.meeting_id)
-    return _serialize_poll(poll, meeting)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found for poll")
+
+    voter_email = _resolve_voter_identity(
+        poll,
+        meeting,
+        request.token,
+        request.voter_email,
+        current_user,
+        require_identity=True,
+    )
+    if not voter_email:
+        raise HTTPException(status_code=403, detail="Sign in or use your personalized poll link to vote.")
+
+    try:
+        poll = await poll_service.add_vote(poll_id, request.option_id, voter_email)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return _serialize_poll(poll, meeting, voter_email)
 
 
 @app.post("/api/polls/{poll_id}/finalize")
@@ -949,23 +1169,9 @@ async def finalize_poll(poll_id: str, request: FinalizePollRequest, current_user
     if poll.organizer_email and poll.organizer_email != current_user.email:
         raise HTTPException(status_code=403, detail="You can only finalize polls you created.")
 
-    meeting = await meeting_service.get_meeting(poll.meeting_id)
-    if poll.winning_option_id and meeting:
-        winning_option = next((opt for opt in poll.options if opt.id == poll.winning_option_id), None)
-        if winning_option:
-            update = MeetingUpdate(
-                start_time=winning_option.start_time,
-                end_time=winning_option.end_time,
-                status="scheduled",
-            )
-            await meeting_service.update_meeting(poll.meeting_id, update)
-            # Remove poll pending flag if present
-            meta = dict(meeting.metadata or {})
-            if meta.pop("poll_pending", None):
-                await meeting_service.update_meeting_metadata(poll.meeting_id, meta)
-            for participant in meeting.participants:
-                await notification_service.send_poll_finalized(meeting, participant, winning_option)
-
+    meeting = await _apply_poll_outcome(poll)
+    if meeting is None:
+        meeting = await meeting_service.get_meeting(poll.meeting_id)
     return _serialize_poll(poll, meeting)
 
 
@@ -1058,7 +1264,7 @@ if __name__ == "__main__":
         port=int(os.getenv("PORT", 8000)),
         reload=True
     )
-def _serialize_poll(poll: Poll, meeting: Optional[Meeting] = None) -> Dict[str, Any]:
+def _serialize_poll(poll: Poll, meeting: Optional[Meeting] = None, viewer_email: Optional[str] = None) -> Dict[str, Any]:
     poll_dict = poll.model_dump(mode="json")
     if meeting:
         poll_dict["meeting_summary"] = {
@@ -1068,4 +1274,18 @@ def _serialize_poll(poll: Poll, meeting: Optional[Meeting] = None) -> Dict[str, 
             "end_time": meeting.end_time.isoformat(),
             "organizer_email": meeting.organizer_email,
         }
+    if viewer_email:
+        viewer_vote = next(
+            (vote.option_id for vote in poll.votes if vote.voter_email.lower() == viewer_email.lower()),
+            None,
+        )
+        poll_dict["viewer_vote_option_id"] = viewer_vote
+    else:
+        poll_dict["viewer_vote_option_id"] = None
+    deadline_dt = poll.deadline
+    if deadline_dt and deadline_dt.tzinfo is None:
+        deadline_dt = deadline_dt.replace(tzinfo=timezone.utc)
+    poll_dict["is_deadline_passed"] = bool(
+        deadline_dt and datetime.now(timezone.utc) >= deadline_dt
+    )
     return poll_dict
