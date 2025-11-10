@@ -1,8 +1,11 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any, Annotated
 from pydantic import BaseModel, Field, BeforeValidator
 from bson import ObjectId
 import uuid
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 def validate_object_id(v):
     if isinstance(v, ObjectId):
@@ -44,8 +47,8 @@ class Meeting(MongoModel):
     duration: int
     status: str = "scheduled"
     organizer_email: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class MeetingCreate(BaseModel):
@@ -72,8 +75,8 @@ class Metadata(MongoModel):
     value: Any
     type: str
     description: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 class User(MongoModel):
     email: str
@@ -82,8 +85,8 @@ class User(MongoModel):
     picture: Optional[str] = None
     calendars: Dict[str, Any] = Field(default_factory=dict)
     preferences: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
     last_login_at: Optional[datetime] = None
 
 
@@ -97,7 +100,7 @@ class PollOption(BaseModel):
 class PollVote(BaseModel):
     option_id: str
     voter_email: str
-    voted_at: datetime = Field(default_factory=datetime.utcnow)
+    voted_at: datetime = Field(default_factory=utcnow)
 
 
 class Poll(MongoModel):
@@ -108,8 +111,8 @@ class Poll(MongoModel):
     status: str = Field(default="open")  # open | closed
     deadline: Optional[datetime] = None
     winning_option_id: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class Room(BaseModel):

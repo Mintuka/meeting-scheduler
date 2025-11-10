@@ -24,10 +24,10 @@ class MeetingService:
             if new_status != meeting.status:
                 await self.collection.update_one(
                     {"_id": meeting.id},
-                    {"$set": {"status": new_status, "updated_at": datetime.utcnow()}}
+                    {"$set": {"status": new_status, "updated_at": datetime.now(timezone.utc)}}
                 )
                 meeting.status = new_status
-                meeting.updated_at = datetime.utcnow()
+                meeting.updated_at = datetime.now(timezone.utc)
         except Exception:
             # If status sync fails, return meeting as-is without blocking request
             pass
@@ -39,7 +39,7 @@ class MeetingService:
         if meeting.status == "polling":
             return "polling"
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if meeting.start_time <= now < meeting.end_time:
             return "running"
         if now >= meeting.end_time:
@@ -109,8 +109,8 @@ class MeetingService:
             "duration": duration,
             "status": status,
             "organizer_email": organizer_email,
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
             "metadata": meta
         }
         
@@ -204,7 +204,7 @@ class MeetingService:
 
             merged_meta["location_type"] = location_type
             update_dict["metadata"] = merged_meta
-            update_dict["updated_at"] = datetime.utcnow()
+            update_dict["updated_at"] = datetime.now(timezone.utc)
             
             result = await self.collection.update_one(
                 {"_id": ObjectId(meeting_id)},
@@ -235,7 +235,7 @@ class MeetingService:
                 {
                     "$set": {
                         "metadata": metadata,
-                        "updated_at": datetime.utcnow()
+                        "updated_at": datetime.now(timezone.utc)
                     }
                 }
             )
@@ -272,7 +272,7 @@ class MeetingService:
         try:
             await self.collection.update_one(
                 {"_id": ObjectId(meeting_id)},
-                {"$set": {"participants": updated_list, "updated_at": datetime.utcnow()}},
+                {"$set": {"participants": updated_list, "updated_at": datetime.now(timezone.utc)}},
             )
             return await self.get_meeting(meeting_id)
         except Exception:
@@ -363,8 +363,8 @@ class MetadataService:
             "value": value,
             "type": metadata_type,
             "description": description,
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow()
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc)
         }
         
         result = await self.collection.insert_one(metadata_doc)
@@ -395,7 +395,7 @@ class MetadataService:
             update_dict = {
                 "value": value,
                 "type": metadata_type,
-                "updated_at": datetime.utcnow()
+                "updated_at": datetime.now(timezone.utc)
             }
             if description:
                 update_dict["description"] = description
@@ -428,8 +428,8 @@ class UserService:
             "email": email,
             "name": name,
             "preferences": preferences or {},
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow()
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc)
         }
         
         result = await self.collection.insert_one(user_doc)
@@ -464,7 +464,7 @@ class UserService:
         picture: Optional[str],
         credentials: Optional[Dict[str, Any]] = None,
     ) -> User:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         update_doc: Dict[str, Any] = {
             "email": email,
             "name": name,
@@ -496,7 +496,7 @@ class UserService:
                 {
                     "$set": {
                         "preferences": preferences,
-                        "updated_at": datetime.utcnow()
+                        "updated_at": datetime.now(timezone.utc)
                     }
                 }
             )
@@ -534,8 +534,8 @@ class PollService:
             "votes": [],
             "status": "open",
             "deadline": self._ensure_utc(deadline),
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
         }
         result = await self.collection.insert_one(poll_doc)
         poll_doc["_id"] = result.inserted_id
@@ -573,7 +573,7 @@ class PollService:
         for option in poll.options:
             option.votes = vote_counts.get(option.id, 0)
 
-        poll.updated_at = datetime.utcnow()
+        poll.updated_at = datetime.now(timezone.utc)
         await self.collection.update_one(
             {"_id": poll.id},
             {"$set": poll.model_dump()}
@@ -599,7 +599,7 @@ class PollService:
 
         poll.status = "closed"
         poll.winning_option_id = option_id
-        poll.updated_at = datetime.utcnow()
+        poll.updated_at = datetime.now(timezone.utc)
         await self.collection.update_one(
             {"_id": poll.id},
             {"$set": poll.model_dump()}

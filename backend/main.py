@@ -405,7 +405,7 @@ poll_auto_finalizer: Optional["PollAutoFinalizer"] = None
 
 async def process_email_reply(meeting_id: str, from_email: str, action: str, payload: str | None):
     # Basic placeholder actions: record metadata; real logic can update meetings
-    metadata_key = f"reply:{meeting_id}:{from_email}:{datetime.utcnow().isoformat()}"
+    metadata_key = f"reply:{meeting_id}:{from_email}:{datetime.now(timezone.utc).isoformat()}"
     await metadata_service.create_metadata(
         key=metadata_key,
         value={"action": action, "payload": payload},
@@ -473,7 +473,7 @@ app.add_middleware(
 async def health_check():
     return {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "service": "meeting-scheduler-backend"
     }
 
@@ -542,7 +542,7 @@ async def google_login(redirect_uri: Optional[str] = Query(default=None)):
     await metadata_service.create_metadata(
         key=f"oauth_state:{state}",
         value={
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "redirect_uri": redirect_uri,
         },
         metadata_type="oauth_state",
@@ -771,7 +771,7 @@ async def get_meeting(meeting_id: str, current_user: CurrentUser):
     _ensure_meeting_owner(meeting, current_user)
     _ensure_meeting_owner(meeting, current_user)
 
-    if meeting.status == "completed" or meeting.end_time <= datetime.utcnow():
+    if meeting.status == "completed" or meeting.end_time <= datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail="Cannot generate event for a completed meeting.")
     return meeting
 
@@ -784,12 +784,22 @@ async def update_meeting(meeting_id: str, meeting_update: MeetingUpdate, current
         raise HTTPException(status_code=404, detail="Meeting not found")
     _ensure_meeting_owner(current_meeting, current_user)
 
-    if current_meeting.status == "completed" or current_meeting.end_time <= datetime.utcnow():
+    if current_meeting.status == "completed" or current_meeting.end_time <= datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail="Completed meetings cannot be modified.")
 
-    # Determine proposed start/end times using provided values or existing
-    proposed_start = meeting_update.start_time or current_meeting.start_time
-    proposed_end = meeting_update.end_time or current_meeting.end_time
+    normalized_start = _ensure_tz(meeting_update.start_time) if meeting_update.start_time else None
+    normalized_end = _ensure_tz(meeting_update.end_time) if meeting_update.end_time else None
+
+    proposed_start = normalized_start or current_meeting.start_time
+    proposed_end = normalized_end or current_meeting.end_time
+
+    if normalized_start is not None or normalized_end is not None:
+        meeting_update = meeting_update.model_copy(
+            update={
+                "start_time": normalized_start,
+                "end_time": normalized_end,
+            }
+        )
 
     if proposed_end <= proposed_start:
         raise HTTPException(status_code=400, detail="End time must be after start time. Please choose an end time later than the start.")
@@ -799,8 +809,8 @@ async def update_meeting(meeting_id: str, meeting_update: MeetingUpdate, current
 
     # If timing changed and no explicit status provided, mark as rescheduled for clarity
     time_changed = (
-        (meeting_update.start_time and meeting_update.start_time != current_meeting.start_time)
-        or (meeting_update.end_time and meeting_update.end_time != current_meeting.end_time)
+        (normalized_start and normalized_start != current_meeting.start_time)
+        or (normalized_end and normalized_end != current_meeting.end_time)
     )
     if time_changed and meeting_update.status is None:
         meeting_update.status = "rescheduled"
@@ -1042,7 +1052,7 @@ async def add_meeting_participants(meeting_id: str, request: AddParticipantsRequ
         raise HTTPException(status_code=404, detail="Meeting not found")
     _ensure_meeting_owner(existing_meeting, current_user)
 
-    if existing_meeting.status == "completed" or existing_meeting.end_time <= datetime.utcnow():
+    if existing_meeting.status == "completed" or existing_meeting.end_time <= datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail="Cannot modify a completed meeting.")
 
     meeting = await meeting_service.add_participants(meeting_id, request.emails)

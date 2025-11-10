@@ -4,7 +4,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 import os
 import logging
@@ -304,7 +304,7 @@ class EmailNotificationService:
             meeting_time = f"{meeting.start_time.strftime('%I:%M %p')} - {meeting.end_time.strftime('%I:%M %p')}"
             
             # Calculate time until meeting
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             time_until = meeting.start_time - now
             hours = int(time_until.total_seconds() // 3600)
             minutes = int((time_until.total_seconds() % 3600) // 60)
