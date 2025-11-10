@@ -94,10 +94,29 @@ export const Dashboard: React.FC = () => {
     }
   };
 
-  const handleMeetingCreated = (meeting: Meeting) => {
+  const handleMeetingCreated = (
+    meeting: Meeting,
+    meta: { isPollOnly: boolean; participantCount: number; createdPoll?: Poll | null }
+  ) => {
     setMeetings(prev => [meeting, ...prev]);
     setShowForm(false);
-    notificationService.meetingCreated(meeting);
+    const { isPollOnly, participantCount, createdPoll } = meta;
+    const shouldShowSummary = !(isPollOnly && !createdPoll);
+    if (shouldShowSummary) {
+      let summaryTitle: string;
+      let summaryMessage: string;
+      if (isPollOnly) {
+        summaryTitle = 'Poll invitations sent';
+        summaryMessage = `Participants will vote on the proposed options for “${meeting.title}”.`;
+      } else if (createdPoll) {
+        summaryTitle = 'Meeting scheduled + poll sent';
+        summaryMessage = `Invitations and poll links were sent to ${participantCount} participants for “${meeting.title}”.`;
+      } else {
+        summaryTitle = 'Meeting scheduled';
+        summaryMessage = `Invitations were sent to ${participantCount} participants for “${meeting.title}”.`;
+      }
+      notificationService.success(summaryTitle, summaryMessage);
+    }
     loadCalendar();
   };
 

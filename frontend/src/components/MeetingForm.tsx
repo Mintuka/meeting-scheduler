@@ -13,12 +13,18 @@ import {
   MinusCircle,
   X,
 } from 'lucide-react';
-import { AvailabilitySuggestion, MeetingFormData, Room, RoomAvailability } from '../types';
+import { AvailabilitySuggestion, MeetingFormData, Meeting, Room, RoomAvailability, Poll } from '../types';
 import { AISchedulerService } from '../services/AISchedulerService';
 import { notificationService } from '../services/NotificationService';
 
+interface MeetingCreationMeta {
+  isPollOnly: boolean;
+  participantCount: number;
+  createdPoll?: Poll | null;
+}
+
 interface MeetingFormProps {
-  onMeetingCreated: (meeting: any) => void;
+  onMeetingCreated: (meeting: Meeting, meta: MeetingCreationMeta) => void;
 }
 
 const formatDateInput = (date: Date) => {
@@ -258,6 +264,7 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
       };
 
       let meeting = await AISchedulerService.createMeeting(formData);
+      let createdPoll: Poll | null = null;
 
       if (selectedPollOptions.length > 0) {
         try {
@@ -267,10 +274,7 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
             pollDeadline ? new Date(pollDeadline) : undefined
           );
           meeting = await AISchedulerService.getMeeting(meeting.id);
-          notificationService.info('Poll Created', 'Participants received voting links.', {
-            label: 'Open Poll',
-            onClick: () => window.open(`/poll/${poll.id}`, '_blank', 'noopener'),
-          });
+          createdPoll = poll;
         } catch (pollError) {
           console.error('Poll creation failed', pollError);
           notificationService.error('Poll Error', 'Meeting created but poll creation failed.');
@@ -279,12 +283,14 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
 
       if (!isPollOnly) {
         await AISchedulerService.sendMeetingInvitation(meeting);
-      } else {
-        notificationService.info('Poll invitations sent', 'Participants will vote on the proposed slots.');
       }
 
       setIsSuccess(true);
-      onMeetingCreated(meeting);
+      onMeetingCreated(meeting, {
+        isPollOnly,
+        participantCount: meeting.participants.length,
+        createdPoll,
+      });
       reset({
         durationMinutes: 60,
         locationType: 'online',
@@ -294,9 +300,6 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
       clearSuggestionState();
       setRoomAvailability([]);
       setRoomAvailabilityError(null);
-      
-      // Show success notification
-      notificationService.meetingInvitationSent(meeting);
       
       setTimeout(() => setIsSuccess(false), 3000);
     } catch (error) {
@@ -371,8 +374,12 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
       setHasChosenTime(false);
       setValue('startTime', '');
       setValue('endTime', '');
-      notificationService.info('Selection cleared', 'Choose another suggested slot or enable manual entry.');
       return;
+    }
+    if (selectedPollOptions.length > 0) {
+      setSelectedPollOptions([]);
+      setJustAddedPollOptionId(null);
+      setPollDeadline(computeDefaultPollDeadline());
     }
     const startDate = new Date(slot.start);
     const endDate = new Date(slot.end);
@@ -382,7 +389,6 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
     setSelectedSuggestionId(slot.start);
     setHasChosenTime(true);
     setManualTimeMode(false);
-    notificationService.info('Time applied', 'Suggested slot copied into the form.');
   };
 
   const addPollOption = (slot: AvailabilitySuggestion) => {
@@ -399,7 +405,6 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
     }
     setSelectedPollOptions((prev) => [...prev, slot]);
     setJustAddedPollOptionId(slot.start);
-    notificationService.info('Poll option added', 'Slot added to poll list.');
   };
 
   const removePollOption = (slotStart: string) => {

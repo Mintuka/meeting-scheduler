@@ -184,14 +184,7 @@ class NotificationService {
   meetingCreated(meeting: Meeting): string {
     return this.success(
       'Meeting Created',
-      `Meeting "${meeting.title}" has been successfully created`,
-      {
-        label: 'Send Invitations',
-        onClick: () => {
-          // This would trigger the invitation sending
-          console.log('Send invitations for meeting:', meeting.id);
-        }
-      }
+      `Meeting "${meeting.title}" has been successfully created`
     );
   }
 
