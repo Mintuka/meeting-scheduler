@@ -14,6 +14,7 @@ interface CalendarViewProps {
   pollSummaries?: Record<string, Poll | null | undefined>;
   onEditMeeting?: (meeting: Meeting) => void;
   onDeleteMeeting?: (meeting: Meeting) => void;
+  onViewMeeting?: (meeting: Meeting) => void;
 }
 
 interface NormalizedEvent {
@@ -65,6 +66,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
   pollSummaries,
   onEditMeeting,
   onDeleteMeeting,
+  onViewMeeting,
 }) => {
   const normalizedEvents = useMemo(() => normalizeEvents(events), [events]);
   const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date(), { weekStartsOn: 1 }));
@@ -166,9 +168,39 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
     const pollId = meeting.metadata?.poll_id as string | undefined;
     const pollSummary = pollId ? pollSummaries?.[pollId] : undefined;
     const isPollOpen = meeting.metadata?.poll_pending || (pollSummary?.status === 'open');
+    const pollStatusLabel = pollSummary
+      ? pollSummary.status === 'open'
+        ? 'Open for votes'
+        : pollSummary.winning_option_id
+        ? 'Poll finalized'
+        : 'Closed · awaiting organizer'
+      : meeting.metadata?.poll_pending
+      ? 'Collecting responses'
+      : 'Loading poll details...';
+
+    const handleViewDetails = () => {
+      if (meeting && onViewMeeting) {
+        onViewMeeting(meeting);
+      }
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        handleViewDetails();
+      }
+    };
+
+    const stopPropagation = (event: React.MouseEvent | React.KeyboardEvent) => event.stopPropagation();
 
     return (
-      <div className="border rounded-xl p-5 bg-white shadow-sm space-y-4 hover:shadow transition">
+      <div
+        className="border rounded-xl p-5 bg-white shadow-sm space-y-4 hover:shadow transition focus:outline-none focus:ring-2 focus:ring-blue-400"
+        role={onViewMeeting ? 'button' : undefined}
+        tabIndex={onViewMeeting ? 0 : -1}
+        onClick={handleViewDetails}
+        onKeyDown={onViewMeeting ? handleKeyDown : undefined}
+      >
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div>
             <p className="font-semibold text-gray-900 text-base">{meeting.title}</p>
@@ -219,21 +251,14 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div>
                 <p className="font-semibold text-purple-900">Poll</p>
-                <p className="text-xs text-purple-700">
-                  {pollSummary
-                    ? pollSummary.status === 'open'
-                      ? 'Open for votes'
-                      : 'Closed · awaiting finalization'
-                    : meeting.metadata?.poll_pending
-                    ? 'Collecting responses'
-                    : 'Loading poll details...'}
-                </p>
+                <p className="text-xs text-purple-700">{pollStatusLabel}</p>
               </div>
               <a
                 href={`/poll/${pollId}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="px-3 py-1.5 text-xs font-semibold text-white bg-purple-600 rounded-md hover:bg-purple-700"
+                onClick={stopPropagation}
               >
                 {isPollOpen ? 'Vote / view poll' : 'View poll'}
               </a>
@@ -243,12 +268,15 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
                 {pollSummary.options.slice(0, 3).map((option) => {
                   const start = new Date(option.start_time);
                   const end = new Date(option.end_time);
+                  const isWinner = pollSummary.winning_option_id === option.id;
                   return (
-                    <div key={option.id} className="flex items-center justify-between">
+                    <div key={option.id} className="flex items-center justify-between w-full">
                       <span>
                         {format(start, 'MMM d · h:mm a')} – {format(end, 'h:mm a')}
                       </span>
-                      <span className="font-semibold">{option.votes} votes</span>
+                      <span className={`font-semibold ${isWinner ? 'text-green-700' : ''}`}>
+                        {option.votes} votes{isWinner ? ' · chosen' : ''}
+                      </span>
                     </div>
                   );
                 })}
@@ -268,6 +296,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center justify-center px-3 py-2 text-xs font-semibold text-white bg-blue-600 rounded-md hover:bg-blue-700"
+              onClick={stopPropagation}
             >
               Join Meeting
             </a>
@@ -276,7 +305,10 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
             <button
               type="button"
               className="inline-flex items-center px-3 py-2 text-xs font-semibold text-blue-600 bg-blue-50 rounded-md hover:bg-blue-100"
-              onClick={() => onEditMeeting(meeting)}
+              onClick={(e) => {
+                stopPropagation(e);
+                onEditMeeting(meeting);
+              }}
             >
               Edit
             </button>
@@ -285,7 +317,10 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
             <button
               type="button"
               className="inline-flex items-center px-3 py-2 text-xs font-semibold text-red-600 bg-red-50 rounded-md hover:bg-red-100"
-              onClick={() => onDeleteMeeting(meeting)}
+              onClick={(e) => {
+                stopPropagation(e);
+                onDeleteMeeting(meeting);
+              }}
             >
               Delete
             </button>

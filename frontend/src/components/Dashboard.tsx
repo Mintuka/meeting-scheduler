@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Calendar, Plus, Clock, LogOut } from 'lucide-react';
 import { Meeting, Poll } from '../types';
 import { MeetingForm } from './MeetingForm';
+import { MeetingDetails } from './MeetingDetails';
 import { Modal } from './Modal';
 import { EditMeetingForm } from './EditMeetingForm';
 import { AISchedulerService } from '../services/AISchedulerService';
@@ -15,6 +16,7 @@ export const Dashboard: React.FC = () => {
   const [pollSummaries, setPollSummaries] = useState<Record<string, Poll | null>>({});
   const [showForm, setShowForm] = useState(false);
   const [editMeeting, setEditMeeting] = useState<Meeting | null>(null);
+  const [viewMeeting, setViewMeeting] = useState<Meeting | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(() => new Date());
@@ -347,6 +349,7 @@ export const Dashboard: React.FC = () => {
             pollSummaries={pollSummaries}
             onEditMeeting={setEditMeeting}
             onDeleteMeeting={(meeting) => handleMeetingDeleted(meeting.id)}
+            onViewMeeting={setViewMeeting}
           />
         </div>
 
@@ -373,6 +376,23 @@ export const Dashboard: React.FC = () => {
             onUpdated={(m, message) => {
               handleMeetingUpdated(m, message);
               setEditMeeting(null);
+            }}
+          />
+        )}
+      </Modal>
+
+      <Modal
+        isOpen={!!viewMeeting}
+        onClose={() => setViewMeeting(null)}
+        title={viewMeeting ? 'Meeting details' : 'Meeting'}
+      >
+        {viewMeeting && (
+          <MeetingDetails
+            meeting={viewMeeting}
+            pollSummary={viewMeeting.metadata?.poll_id ? pollSummaries[viewMeeting.metadata.poll_id] : undefined}
+            onEdit={(meeting) => {
+              setEditMeeting(meeting);
+              setViewMeeting(null);
             }}
           />
         )}
