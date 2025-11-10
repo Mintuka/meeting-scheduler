@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { AISchedulerService } from '../services/AISchedulerService';
 import { notificationService } from '../services/NotificationService';
+import { useAuth } from '../context/AuthContext';
 
 interface PollOption {
   id: string;
@@ -24,18 +25,28 @@ interface Poll {
   status: string;
   options: PollOption[];
   meeting_summary?: PollMeetingSummary;
+  viewer_vote_option_id?: string | null;
+  is_deadline_passed?: boolean;
 }
 
 export const PollPage: React.FC = () => {
   const { pollId } = useParams<{ pollId: string }>();
+  const [searchParams] = useSearchParams();
+  const { user } = useAuth();
   const [poll, setPoll] = useState<Poll | null>(null);
-  const [voterEmail, setVoterEmail] = useState('');
+  const [token, setToken] = useState<string | null>(null);
+  const [tokenEmail, setTokenEmail] = useState<string | null>(null);
+  const [legacyEmail, setLegacyEmail] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [identityReady, setIdentityReady] = useState(false);
 
-  const loadPoll = async () => {
+  const loadPoll = async (currentToken?: string | null, currentLegacyEmail?: string | null) => {
     try {
       if (!pollId) return;
-      const data = await AISchedulerService.getPoll(pollId);
+      const data = await AISchedulerService.getPoll(pollId, {
+        token: currentToken ?? undefined,
+        voterEmail: currentLegacyEmail ?? undefined,
+      });
       setPoll(data);
     } catch (error) {
       console.error('Failed to load poll', error);
@@ -44,24 +55,66 @@ export const PollPage: React.FC = () => {
   };
 
   useEffect(() => {
-    loadPoll();
+    const tokenParam = searchParams.get('token');
+    const emailParam = searchParams.get('email');
+    setToken(tokenParam);
+    setTokenEmail(tokenParam ? decodeTokenEmail(tokenParam) : null);
+    setLegacyEmail(emailParam);
+    setIdentityReady(true);
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (!identityReady) return;
+    loadPoll(token, legacyEmail);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pollId]);
+  }, [pollId, token, legacyEmail, identityReady]);
+
+  const linkEmail = tokenEmail || legacyEmail;
+
+  const effectiveEmail = useMemo(() => {
+    if (linkEmail) return linkEmail;
+    if (user?.email) return user.email;
+    return null;
+  }, [linkEmail, user]);
+
+  const emailConflict =
+    Boolean(linkEmail && user?.email && linkEmail.toLowerCase() !== user.email.toLowerCase());
 
   const vote = async (optionId: string) => {
     if (!pollId) return;
-    if (!voterEmail) {
-      notificationService.warning('Email required', 'Please enter your email to vote');
+    if (poll?.is_deadline_passed) {
+      notificationService.warning('Poll closed', 'The voting deadline has passed for this poll.');
+      return;
+    }
+    if (!effectiveEmail) {
+      notificationService.warning(
+        'Unable to vote',
+        'Sign in or open your secure poll link to cast a vote.'
+      );
+      return;
+    }
+    if (emailConflict) {
+      notificationService.warning(
+        'Account mismatch',
+        `This poll link is reserved for ${linkEmail}. Switch accounts or use a private window to vote on their behalf.`
+      );
       return;
     }
     try {
       setIsSubmitting(true);
-      const data = await AISchedulerService.votePoll(pollId, optionId, voterEmail);
+      const legacyVoterEmail = tokenEmail ? undefined : legacyEmail || undefined;
+      const data = await AISchedulerService.votePoll(
+        pollId,
+        optionId,
+        token ?? undefined,
+        legacyVoterEmail
+      );
       setPoll(data);
       notificationService.success('Vote submitted', 'Thank you for your response!');
-    } catch (error) {
+    } catch (error: unknown) {
       console.error('Failed to vote', error);
-      notificationService.error('Vote Error', 'Unable to submit your vote');
+      const message = error instanceof Error ? error.message : 'Unable to submit your vote';
+      notificationService.error('Vote Error', message);
     } finally {
       setIsSubmitting(false);
     }
@@ -74,6 +127,9 @@ export const PollPage: React.FC = () => {
       </div>
     );
   }
+
+  const myVote = poll.viewer_vote_option_id ?? null;
+  const deadlineReached = Boolean(poll.is_deadline_passed);
 
   return (
     <div className="min-h-screen bg-gray-50 py-10 px-4">
@@ -97,38 +153,82 @@ export const PollPage: React.FC = () => {
         {poll.status !== 'open' && (
           <div className="mb-4 text-sm text-green-600">This poll has been closed.</div>
         )}
+        {poll.status === 'open' && deadlineReached && (
+          <div className="mb-4 text-sm text-amber-600">
+            Poll deadline passed. Awaiting organizer to finalize the results.
+          </div>
+        )}
 
-        <div className="mb-6">
-          <label className="block text-sm font-medium text-gray-700 mb-2">Your email</label>
-          <input
-            type="email"
-            value={voterEmail}
-            onChange={(e) => setVoterEmail(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-            placeholder="you@example.com"
-          />
+        <div className="mb-6 border rounded-md p-4 bg-gray-50">
+          <p className="text-sm font-medium text-gray-700 mb-1">Participant</p>
+          {effectiveEmail ? (
+            <p className="text-gray-900">
+              Voting as <span className="font-semibold">{effectiveEmail}</span>
+            </p>
+          ) : (
+            <p className="text-gray-600">
+              Sign in or reopen your personalized invitation link to identify yourself before voting.
+            </p>
+          )}
+          {emailConflict && (
+            <p className="text-xs text-red-600 mt-2">
+              This link belongs to <span className="font-semibold">{linkEmail}</span>. Open it in a
+              private window or sign out to vote on their behalf.
+            </p>
+          )}
         </div>
 
         <div className="space-y-3">
-          {poll.options.map((option) => (
-            <div key={option.id} className="border rounded-md p-4 flex items-center justify-between">
-              <div>
-                <p className="font-medium text-gray-800">
-                  {new Date(option.start_time).toLocaleString()} - {new Date(option.end_time).toLocaleTimeString()}
-                </p>
-                <p className="text-sm text-gray-500">{option.votes} votes</p>
+          {poll.options.map((option) => {
+            const isUsersPick = myVote === option.id;
+            return (
+              <div key={option.id} className="border rounded-md p-4 flex items-center justify-between">
+                <div>
+                  <p className="font-medium text-gray-800">
+                    {new Date(option.start_time).toLocaleString()} - {new Date(option.end_time).toLocaleTimeString()}
+                  </p>
+                  <p className="text-sm text-gray-500">{option.votes} votes</p>
+                </div>
+                <button
+                  disabled={
+                    poll.status !== 'open' ||
+                    isSubmitting ||
+                    !effectiveEmail ||
+                    emailConflict ||
+                    deadlineReached
+                  }
+                  onClick={() => vote(option.id)}
+                  aria-pressed={isUsersPick}
+                  className={`px-4 py-2 rounded-md text-white transition ${
+                    isUsersPick
+                      ? 'bg-green-600 hover:bg-green-700'
+                      : 'bg-blue-600 hover:bg-blue-700'
+                  } disabled:opacity-50`}
+                >
+                  {isUsersPick ? 'Voted' : 'Vote'}
+                </button>
               </div>
-              <button
-                disabled={poll.status !== 'open' || isSubmitting}
-                onClick={() => vote(option.id)}
-                className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
-              >
-                Vote
-              </button>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </div>
   );
+};
+
+const decodeTokenEmail = (token: string): string | null => {
+  try {
+    const parts = token.split('.');
+    if (parts.length < 2) {
+      return null;
+    }
+    const payload = parts[1];
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), '=');
+    const decoded = atob(padded);
+    const data = JSON.parse(decoded);
+    return typeof data.email === 'string' ? data.email : null;
+  } catch {
+    return null;
+  }
 };

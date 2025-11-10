@@ -97,14 +97,26 @@ export class AISchedulerService {
     });
   }
 
-  static async getPoll(pollId: string): Promise<Poll> {
-    return this.makeRequest(`/api/polls/${pollId}`);
+  static async getPoll(
+    pollId: string,
+    options?: { token?: string; voterEmail?: string }
+  ): Promise<Poll> {
+    const params = new URLSearchParams();
+    if (options?.token) {
+      params.set('token', options.token);
+    }
+    if (options?.voterEmail) {
+      params.set('voter_email', options.voterEmail);
+    }
+    const query = params.toString();
+    const path = query ? `/api/polls/${pollId}?${query}` : `/api/polls/${pollId}`;
+    return this.makeRequest(path);
   }
 
-  static async votePoll(pollId: string, optionId: string, voterEmail: string): Promise<Poll> {
+  static async votePoll(pollId: string, optionId: string, token?: string, voterEmail?: string): Promise<Poll> {
     return this.makeRequest(`/api/polls/${pollId}/vote`, {
       method: 'POST',
-      body: JSON.stringify({ option_id: optionId, voter_email: voterEmail }),
+      body: JSON.stringify({ option_id: optionId, token, voter_email: voterEmail }),
     });
   }
 

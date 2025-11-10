@@ -97,4 +97,6 @@ export interface Poll {
   options: PollOption[];
   deadline?: string;
   winning_option_id?: string;
+  viewer_vote_option_id?: string | null;
+  is_deadline_passed?: boolean;
 }
