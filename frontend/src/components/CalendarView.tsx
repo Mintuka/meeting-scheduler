@@ -22,6 +22,7 @@ interface CalendarViewProps {
   onEditMeeting?: (meeting: Meeting) => void;
   onDeleteMeeting?: (meeting: Meeting) => void;
   onViewMeeting?: (meeting: Meeting) => void;
+  className?: string;
 }
 
 interface NormalizedEvent {
@@ -67,6 +68,11 @@ const normalizeEvents = (events: any[]): NormalizedEvent[] => {
   return normalized.sort((a, b) => a.start.getTime() - b.start.getTime());
 };
 
+const getWeekdayOffset = (date: Date) => {
+  const jsDay = date.getDay(); // Sunday = 0
+  return (jsDay + 6) % 7; // convert so Monday = 0
+};
+
 export const CalendarView: React.FC<CalendarViewProps> = ({
   events,
   currentTime,
@@ -74,20 +80,39 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
   onEditMeeting,
   onDeleteMeeting,
   onViewMeeting,
+  className,
 }) => {
   const normalizedEvents = useMemo(() => normalizeEvents(events), [events]);
   const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date(), { weekStartsOn: 1 }));
-  const [selectedDate, setSelectedDate] = useState<Date | null>(null);
+  const [selectedDate, setSelectedDate] = useState<Date>(() => new Date());
   const timezone = useMemo(() => Intl.DateTimeFormat().resolvedOptions().timeZone, []);
   const today = new Date();
   const weekDays = Array.from({ length: 7 }, (_, index) => addDays(weekStart, index));
+  const selectedEvents = useMemo(
+    () => normalizedEvents.filter((event) => selectedDate && isSameDay(event.start, selectedDate)),
+    [normalizedEvents, selectedDate]
+  );
 
   const handleMonthInput = (event: React.ChangeEvent<HTMLInputElement>) => {
     const value = event.target.value;
     if (!value) return;
     const [year, month] = value.split('-').map(Number);
     const jumpDate = new Date(year, month - 1, 1);
-    setWeekStart(startOfWeek(jumpDate, { weekStartsOn: 1 }));
+    const newWeekStart = startOfWeek(jumpDate, { weekStartsOn: 1 });
+    setWeekStart(newWeekStart);
+    setSelectedDate(jumpDate);
+  };
+
+  const shiftWeek = (direction: number) => {
+    const nextWeek = addWeeks(weekStart, direction);
+    setWeekStart(nextWeek);
+    setSelectedDate((prev) => {
+      if (!prev) {
+        return addDays(nextWeek, 0);
+      }
+      const offset = getWeekdayOffset(prev);
+      return addDays(nextWeek, offset);
+    });
   };
 
   const renderDayEvents = (day: Date) => {
@@ -96,19 +121,19 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
       return <p className="text-[11px] text-gray-400">No events</p>;
     }
     return (
-      <>
-        {dayEvents.slice(0, 3).map((event) => (
-          <div key={`${event.id}-${event.start.toISOString()}`} className="text-[11px] bg-blue-50 text-blue-900 rounded px-1 py-0.5 truncate">
+      <div className="space-y-1">
+        {dayEvents.map((event) => (
+          <div
+            key={`${event.id}-${event.start.toISOString()}`}
+            className="text-[11px] bg-blue-50 text-blue-900 rounded px-1 py-0.5 truncate"
+          >
             <p className="font-medium truncate">{event.summary}</p>
             <p>
               {format(event.start, 'h:mm a')} – {format(event.end, 'h:mm a')}
             </p>
           </div>
         ))}
-        {dayEvents.length > 3 && (
-          <p className="text-[11px] text-gray-500">+{dayEvents.length - 3} more</p>
-        )}
-      </>
+      </div>
     );
   };
 
@@ -339,108 +364,110 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
     );
   };
 
+  const containerClass = ['bg-white rounded-lg shadow p-4 h-full', className].filter(Boolean).join(' ');
+
   return (
-    <div className="bg-white rounded-lg shadow p-4">
-      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-4">
-        <div>
-          <p className="text-sm uppercase tracking-wide text-gray-500">Calendar · week view</p>
-          <h3 className="text-2xl font-semibold text-gray-900">
-            {format(weekStart, 'MMM d')} – {format(addDays(weekStart, 6), 'MMM d, yyyy')}
-          </h3>
-          <p className="text-xs text-gray-500 mt-1">Your timezone: {timezone}</p>
-        </div>
-        <div className="flex flex-wrap gap-2 items-center">
-          <button
-            type="button"
-            onClick={() => setWeekStart((prev) => addWeeks(prev, -1))}
-            className="px-3 py-2 border rounded-md text-sm text-gray-700 hover:bg-gray-50"
-          >
-            ← Previous week
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              const todayWeek = startOfWeek(new Date(), { weekStartsOn: 1 });
-              setWeekStart(todayWeek);
-              setSelectedDate(new Date());
-            }}
-            className="px-3 py-2 border rounded-md text-sm text-gray-700 hover:bg-gray-50"
-          >
-            Today
-          </button>
-          <button
-            type="button"
-            onClick={() => setWeekStart((prev) => addWeeks(prev, 1))}
-            className="px-3 py-2 border rounded-md text-sm text-gray-700 hover:bg-gray-50"
-          >
-            Next week →
-          </button>
-          <input
-            type="month"
-            value={format(weekStart, 'yyyy-MM')}
-            onChange={handleMonthInput}
-            className="px-3 py-2 border rounded-md text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
-          />
-        </div>
-      </div>
-
-      <div className="grid grid-cols-7 text-xs font-semibold text-gray-500 border-b border-gray-100 pb-2">
-        {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((label) => (
-          <div key={label} className="text-center uppercase tracking-wide">
-            {label}
+    <div className={containerClass}>
+      <div className="flex flex-col h-full">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-4">
+          <div>
+            <h3 className="text-2xl font-semibold text-gray-900">
+              {format(weekStart, 'MMM d')} – {format(addDays(weekStart, 6), 'MMM d, yyyy')}
+            </h3>
+            <p className="text-xs text-gray-500 mt-1">Your timezone: {timezone}</p>
           </div>
-        ))}
-      </div>
-
-      <div className="grid grid-cols-7 gap-2 mt-2">
-        {weekDays.map((day) => {
-          const isToday = isSameDay(day, today);
-          const isSelected = selectedDate ? isSameDay(selectedDate, day) : false;
-          return (
+          <div className="flex flex-wrap gap-2 items-center">
             <button
-              key={day.toISOString()}
               type="button"
-              onClick={() => setSelectedDate(day)}
-              className={[
-                'border rounded-md p-2 text-left transition-all h-36 flex flex-col',
-                isToday ? 'border-blue-500' : 'border-gray-200',
-                isSelected ? 'ring-2 ring-blue-400' : '',
-                'bg-white',
-              ].join(' ')}
+              onClick={() => shiftWeek(-1)}
+              className="px-3 py-2 border rounded-md text-sm text-gray-700 hover:bg-gray-50"
             >
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-gray-900 font-medium">{format(day, 'EEE d')}</span>
-                {isToday && <span className="text-[10px] font-semibold text-blue-600 uppercase">Today</span>}
-              </div>
-              <div className="mt-2 space-y-1 overflow-y-auto pr-1 flex-1">
-                {renderDayEvents(day)}
-              </div>
+              ← Previous week
             </button>
-          );
-        })}
-      </div>
-
-      {selectedDate && (
-        <div className="mt-4 border-t pt-4">
-          <div className="flex items-center justify-between mb-3">
-            <p className="text-sm font-medium text-gray-700">{format(selectedDate, 'EEEE, MMMM d, yyyy')}</p>
-            <span className="text-xs text-gray-500">
-              {normalizedEvents.filter((event) => isSameDay(event.start, selectedDate)).length} events
-            </span>
-          </div>
-          <div className="space-y-3 max-h-72 overflow-y-auto">
-            {normalizedEvents.filter((event) => isSameDay(event.start, selectedDate)).length === 0 ? (
-              <p className="text-sm text-gray-500">No events scheduled for this day.</p>
-            ) : (
-              normalizedEvents
-                .filter((event) => isSameDay(event.start, selectedDate))
-                .map((event) => (
-                  <div key={`${event.id}-${event.start.toISOString()}`}>{renderMeetingCard(event)}</div>
-                ))
-            )}
+            <button
+              type="button"
+              onClick={() => {
+                const todayWeek = startOfWeek(new Date(), { weekStartsOn: 1 });
+                setWeekStart(todayWeek);
+                setSelectedDate(new Date());
+              }}
+              className="px-3 py-2 border rounded-md text-sm text-gray-700 hover:bg-gray-50"
+            >
+              Today
+            </button>
+            <button
+              type="button"
+              onClick={() => shiftWeek(1)}
+              className="px-3 py-2 border rounded-md text-sm text-gray-700 hover:bg-gray-50"
+            >
+              Next week →
+            </button>
+            <input
+              type="month"
+              value={format(weekStart, 'yyyy-MM')}
+              onChange={handleMonthInput}
+              className="px-3 py-2 border rounded-md text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            />
           </div>
         </div>
-      )}
+
+        <div className="flex flex-col lg:flex-row gap-6 flex-1 overflow-hidden">
+          <section className="lg:w-3/5 flex-shrink-0 flex flex-col overflow-hidden h-full lg:min-h-0">
+            <div className="overflow-x-auto flex-none">
+              <div className="grid grid-cols-7 min-w-[640px] text-xs font-semibold text-gray-500 border-b border-gray-100 pb-2">
+                {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((label) => (
+                  <div key={label} className="text-center uppercase tracking-wide">
+                    {label}
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="mt-2 flex-1 overflow-x-auto lg:overflow-hidden lg:min-h-0">
+              <div className="grid grid-cols-7 gap-2 min-w-[640px] h-full">
+                {weekDays.map((day) => {
+                  const isToday = isSameDay(day, today);
+                  const isSelected = isSameDay(selectedDate, day);
+                  return (
+                    <button
+                      key={day.toISOString()}
+                      type="button"
+                      onClick={() => setSelectedDate(day)}
+                      className={[
+                        'border rounded-md p-2 text-left transition-all h-full min-h-[220px] flex flex-col bg-white',
+                        isToday ? 'border-blue-500' : 'border-gray-200',
+                        isSelected ? 'ring-2 ring-blue-400' : '',
+                      ].join(' ')}
+                    >
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-gray-900 font-medium">{format(day, 'EEE d')}</span>
+                        {isToday && <span className="text-[10px] font-semibold text-blue-600 uppercase">Today</span>}
+                      </div>
+                      <div className="mt-2 overflow-y-auto pr-1 flex-1">{renderDayEvents(day)}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </section>
+
+          <section className="lg:flex-1 flex flex-col bg-gray-50 rounded-lg p-4 border border-gray-100 overflow-hidden h-full lg:min-h-0">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs uppercase tracking-wide text-gray-500">Selected day</p>
+                <h4 className="text-lg font-semibold text-gray-900">{format(selectedDate, 'EEEE, MMMM d, yyyy')}</h4>
+              </div>
+              <span className="text-xs text-gray-500">{selectedEvents.length} events</span>
+            </div>
+            <div className="mt-4 flex-1 overflow-y-auto space-y-3 pr-1">
+              {selectedEvents.length === 0 ? (
+                <p className="text-sm text-gray-500">No events scheduled for this day.</p>
+              ) : (
+                selectedEvents.map((event) => <div key={`${event.id}-${event.start.toISOString()}`}>{renderMeetingCard(event)}</div>)
+              )}
+            </div>
+          </section>
+        </div>
+      </div>
     </div>
   );
 };

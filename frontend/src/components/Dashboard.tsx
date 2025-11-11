@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Calendar, Plus, Clock, LogOut } from 'lucide-react';
+import { Calendar, Plus, LogOut } from 'lucide-react';
 import { Meeting, Poll } from '../types';
 import { MeetingForm } from './MeetingForm';
 import { MeetingDetails } from './MeetingDetails';
@@ -242,16 +242,6 @@ export const Dashboard: React.FC = () => {
                 Sign out
               </button>
               <button
-                onClick={() => {
-                  loadMeetings();
-                  loadCalendar();
-                }}
-                className="flex items-center px-3 py-2 text-gray-600 hover:text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-md"
-              >
-                <Clock className="h-5 w-5 mr-2" />
-                Refresh
-              </button>
-              <button
                 onClick={() => setShowForm(!showForm)}
                 className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
@@ -283,8 +273,9 @@ export const Dashboard: React.FC = () => {
 
       {/* Main Content */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        <div className="space-y-8">
+        <div className="min-h-[calc(100vh-200px)] lg:min-h-[calc(100vh-140px)] lg:h-[calc(100vh-140px)]">
           <CalendarView
+            className="h-full"
             events={[
               ...meetings.map((meeting) => ({
                 id: `meeting-${meeting.id}`,
