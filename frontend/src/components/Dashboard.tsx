@@ -159,9 +159,6 @@ export const Dashboard: React.FC = () => {
     }
   };
 
-  const upcomingMeetings = meetings.filter(m => m.startTime > currentTime).length;
-  const runningMeetings = meetings.filter((m: Meeting) => m.startTime <= currentTime && m.endTime > currentTime).length;
-
   const meetingGoogleEventIds = useMemo(
     () =>
       meetings
@@ -284,50 +281,8 @@ export const Dashboard: React.FC = () => {
         </div>
       )}
 
-      {/* Stats */}
+      {/* Main Content */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-          <div className="bg-white rounded-lg shadow p-6">
-            <div className="flex items-center">
-              <Calendar className="h-8 w-8 text-blue-600 mr-3" />
-              <div>
-                <p className="text-sm font-medium text-gray-600">Total Meetings</p>
-                <p className="text-2xl font-bold text-gray-900">{meetings.length}</p>
-              </div>
-            </div>
-          </div>
-          {/* <div className="bg-white rounded-lg shadow p-6">
-            <div className="flex items-center">
-              <Users className="h-8 w-8 text-green-600 mr-3" />
-              <div>
-                <p className="text-sm font-medium text-gray-600">Total Participants</p>
-                <p className="text-2xl font-bold text-gray-900">{totalParticipants}</p>
-              </div>
-            </div>
-          </div> */}
-          <div className="bg-white rounded-lg shadow p-6">
-            <div className="flex items-center">
-              <Clock className="h-8 w-8 text-yellow-600 mr-3" />
-              <div>
-                <p className="text-sm font-medium text-gray-600">Upcoming</p>
-                <p className="text-2xl font-bold text-gray-900">{upcomingMeetings}</p>
-              </div>
-            </div>
-          </div>
-          <div className="bg-white rounded-lg shadow p-6">
-            <div className="flex items-center">
-              <div className="h-8 w-8 bg-red-100 rounded-full flex items-center justify-center mr-3">
-                <div className="h-3 w-3 bg-red-500 rounded-full animate-pulse"></div>
-              </div>
-              <div>
-                <p className="text-sm font-medium text-gray-600">Running Now</p>
-                <p className="text-2xl font-bold text-gray-900">{runningMeetings}</p>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Main Content */}
         <div className="space-y-8">
           <CalendarView
             events={[
@@ -354,8 +309,8 @@ export const Dashboard: React.FC = () => {
         </div>
 
         {/* Meeting Form Modal */}
-        <Modal 
-          isOpen={showForm} 
+        <Modal
+          isOpen={showForm}
           onClose={() => setShowForm(false)}
           title="Create New Meeting"
         >
