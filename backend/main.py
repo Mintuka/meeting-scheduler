@@ -26,6 +26,7 @@ from app.google_calendar import (
     create_calendar_event,
     update_event_attendees,
     update_event,
+    delete_event,
 )
 import anyio
 from app.notification_service import notification_service
@@ -896,6 +897,20 @@ async def delete_meeting(meeting_id: str, current_user: CurrentUser):
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
     _ensure_meeting_owner(meeting, current_user)
+    google_event_id = (meeting.metadata or {}).get("google_event_id")
+    creds = (current_user.preferences or {}).get("google_credentials")
+    if google_event_id and creds:
+        try:
+            from functools import partial
+
+            delete_fn = partial(
+                delete_event,
+                creds,
+                event_id=google_event_id,
+            )
+            await anyio.to_thread.run_sync(delete_fn)
+        except Exception as exc:
+            print(f"Failed to delete Google Calendar event {google_event_id}: {exc}")
     success = await meeting_service.delete_meeting(meeting_id)
     if not success:
         raise HTTPException(status_code=404, detail="Meeting not found")

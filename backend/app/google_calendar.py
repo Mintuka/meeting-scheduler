@@ -254,3 +254,19 @@ def update_event(
         .execute()
     )
     return updated
+
+
+def delete_event(
+    creds_dict: Dict[str, Any],
+    *,
+    event_id: str,
+    send_updates: str = "all",
+) -> None:
+    """Delete a Google Calendar event."""
+    creds = dict_to_credentials(creds_dict)
+    service = build("calendar", "v3", credentials=creds)
+    service.events().delete(
+        calendarId="primary",
+        eventId=event_id,
+        sendUpdates=send_updates,
+    ).execute()
