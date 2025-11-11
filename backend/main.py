@@ -634,16 +634,6 @@ async def create_meeting(meeting_data: MeetingCreate, current_user: CurrentUser)
     if (end_time - start_time) < timedelta(minutes=5):
         raise HTTPException(status_code=400, detail="Meeting duration must be at least 5 minutes. Extend the end time or move the start time earlier.")
 
-    # Ensure the creator is included in participants if not already
-    # participants is a list of email strings
-    # Prepend creator to ensure they're first (used for poll creation permission)
-    if user_email not in meeting_data.participants:
-        meeting_data.participants.insert(0, user_email)
-    else:
-        # If creator is already in list, move them to first position
-        meeting_data.participants.remove(user_email)
-        meeting_data.participants.insert(0, user_email)
-
     # Create meeting in DB first
     try:
         meeting = await meeting_service.create_meeting(
@@ -948,11 +938,6 @@ async def send_invitation(meeting_id: str, current_user: CurrentUser):
         raise HTTPException(status_code=404, detail="Meeting not found")
     _ensure_meeting_owner(meeting, current_user)
     
-    # Check if user is a participant
-    participant_emails = [p.email for p in meeting.participants]
-    if user_email not in participant_emails:
-        raise HTTPException(status_code=403, detail="You don't have permission to send invitations for this meeting")
-    
     # Send invitations to all participants
     results = await notification_service.send_bulk_invitations(meeting)
     
@@ -1185,6 +1170,27 @@ async def get_poll(
     )
     return _serialize_poll(poll, meeting, viewer_email)
 
+
+@app.post("/api/polls/{poll_id}/vote")
+async def vote_poll(poll_id: str, request: VoteRequest, current_user: OptionalCurrentUser = None):
+    poll = await poll_service.get_poll(poll_id)
+    if not poll:
+        raise HTTPException(status_code=404, detail="Poll not found")
+
+    meeting = await meeting_service.get_meeting(poll.meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found for poll")
+
+    voter_email = _resolve_voter_identity(
+        poll,
+        meeting,
+        request.token,
+        request.voter_email,
+        current_user,
+        require_identity=True,
+    )
+    if not voter_email:
+        raise HTTPException(status_code=403, detail="Sign in or use your personalized poll link to vote.")
 
 @app.post("/api/polls/{poll_id}/vote")
 async def vote_poll(poll_id: str, request: VoteRequest, current_user: OptionalCurrentUser = None):

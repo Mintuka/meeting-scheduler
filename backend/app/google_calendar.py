@@ -19,15 +19,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/userinfo.profile",
 ]
 
-# Scopes for user authentication (profile and email)
-# Note: Google automatically adds "openid" scope when using userinfo scopes
-AUTH_SCOPES = [
-    "openid",
-    "https://www.googleapis.com/auth/userinfo.profile",
-    "https://www.googleapis.com/auth/userinfo.email",
-    "https://www.googleapis.com/auth/calendar.events",
-]
-
 
 def _client_config_from_env() -> Dict[str, Any]:
     client_id = os.getenv("GOOGLE_CLIENT_ID")
