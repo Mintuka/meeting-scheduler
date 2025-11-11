@@ -433,14 +433,22 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
                       type="button"
                       onClick={() => setSelectedDate(day)}
                       className={[
-                        'border rounded-md p-2 text-left transition-all h-full min-h-[220px] flex flex-col bg-white',
-                        isToday ? 'border-blue-500' : 'border-gray-200',
-                        isSelected ? 'ring-2 ring-blue-400' : '',
+                        'border rounded-xl p-3 text-left transition-all h-full min-h-[220px] flex flex-col bg-white',
+                        isSelected
+                          ? 'border-2 border-blue-500 shadow-sm'
+                          : 'border-gray-200 hover:border-blue-300',
+                        isToday && !isSelected ? 'bg-blue-50 border-blue-200' : '',
                       ].join(' ')}
                     >
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="text-gray-900 font-medium">{format(day, 'EEE d')}</span>
-                        {isToday && <span className="text-[10px] font-semibold text-blue-600 uppercase">Today</span>}
+                      <div className="flex items-center text-sm gap-2">
+                        {isToday && (
+                          <span className="inline-flex h-2.5 w-2.5 items-center justify-center" aria-label="Today">
+                            <span className="block h-2.5 w-2.5 rounded-full bg-blue-500"></span>
+                          </span>
+                        )}
+                        <span className={`font-medium ${isToday ? 'text-blue-700' : 'text-gray-900'}`}>
+                          {format(day, 'EEE d')}
+                        </span>
                       </div>
                       <div className="mt-2 overflow-y-auto pr-1 flex-1">{renderDayEvents(day)}</div>
                     </button>
