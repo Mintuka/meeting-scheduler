@@ -208,11 +208,13 @@ export const Dashboard: React.FC = () => {
     );
   }
 
+  const containerClasses = "w-full max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-10 xl:px-16";
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
       <header className="bg-white shadow-sm border-b border-gray-200">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className={containerClasses}>
           <div className="flex justify-between items-center py-6">
             <div className="flex items-center">
               <Calendar className="h-8 w-8 text-blue-600 mr-3" />
@@ -255,7 +257,7 @@ export const Dashboard: React.FC = () => {
 
       {/* Error Message */}
       {error && (
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+        <div className={`${containerClasses} py-4`}>
           <div className="bg-red-50 border border-red-200 rounded-md p-4">
             <div className="flex">
               <div className="flex-shrink-0">
@@ -272,7 +274,7 @@ export const Dashboard: React.FC = () => {
       )}
 
       {/* Main Content */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+      <div className={`${containerClasses} py-6`}>
         <div className="min-h-[calc(100vh-200px)] lg:min-h-[calc(100vh-140px)] lg:h-[calc(100vh-140px)]">
           <CalendarView
             className="h-full"
