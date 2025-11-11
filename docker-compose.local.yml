@@ -1,7 +1,7 @@
 services:
   backend-dev:
+    env_file:
+      - docker.env
     environment:
-      - MONGODB_URL=mongodb://admin:password@mongodb-dev:27017/meeting_scheduler?authSource=admin
-      - MONGODB_DATABASE=meeting_scheduler
-    depends_on:
-      - mongodb-dev
+      # MONGODB_URL and MONGODB_DATABASE are loaded from docker.env
+      # Using MongoDB Atlas cloud database instead of local MongoDB

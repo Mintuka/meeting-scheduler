@@ -5,6 +5,8 @@ import { MeetingForm } from './MeetingForm';
 import { MeetingDetails } from './MeetingDetails';
 import { Modal } from './Modal';
 import { EditMeetingForm } from './EditMeetingForm';
+import { EditEventForm } from './EditEventForm';
+import { UserProfileDropdown } from './UserProfileDropdown';
 import { AISchedulerService } from '../services/AISchedulerService';
 import { notificationService } from '../services/NotificationService';
 import { useAuth } from '../context/AuthContext';
@@ -15,6 +17,7 @@ export const Dashboard: React.FC = () => {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [pollSummaries, setPollSummaries] = useState<Record<string, Poll | null>>({});
   const [showForm, setShowForm] = useState(false);
+  const [showEventForm, setShowEventForm] = useState(false);
   const [editMeeting, setEditMeeting] = useState<Meeting | null>(null);
   const [viewMeeting, setViewMeeting] = useState<Meeting | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -65,6 +68,13 @@ export const Dashboard: React.FC = () => {
   }, [meetings, pollSummaries]);
 
   const loadMeetings = async () => {
+    // Only load meetings if user is authenticated
+    if (!user) {
+      setMeetings([]);
+      setIsLoading(false);
+      return;
+    }
+    
     try {
       setIsLoading(true);
       setError(null);
@@ -73,12 +83,21 @@ export const Dashboard: React.FC = () => {
         return;
       }
       const fetchedMeetings = await AISchedulerService.getMeetings();
-      setMeetings(fetchedMeetings);
-    } catch (err) {
+      setMeetings(fetchedMeetings || []);
+    } catch (err: any) {
       console.error('Error loading meetings:', err);
-      const errorMessage = 'Failed to load meetings. Please try again.';
+      const errorMessage = err.message || 'Failed to load meetings. Please try again.';
+      
+      // Don't show error if user is not authenticated or if it's a 401
+      if (errorMessage.includes('401') || errorMessage.includes('Not authenticated')) {
+        setMeetings([]);
+        setIsLoading(false);
+        return;
+      }
+      
       setError(errorMessage);
       notificationService.error('Load Error', errorMessage);
+      setMeetings([]);
     } finally {
       setIsLoading(false);
     }
@@ -197,7 +216,7 @@ export const Dashboard: React.FC = () => {
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-          <p className="text-gray-600">Loading meetings...</p>
+          <p className="text-gray-600">{isAuthLoading ? 'Checking authentication...' : 'Loading data...'}</p>
         </div>
       </div>
     );
@@ -313,6 +332,7 @@ export const Dashboard: React.FC = () => {
             onViewMeeting={setViewMeeting}
           />
         </div>
+      )}
 
         {/* Meeting Form Modal */}
         <Modal
