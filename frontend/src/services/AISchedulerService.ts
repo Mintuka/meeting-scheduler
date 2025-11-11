@@ -1,5 +1,5 @@
-import { Meeting, Participant, TimeSlot, MeetingFormData, Event, EventFormData, Poll, PollCreate } from '../types';
-import { authService } from './AuthService';
+import { Meeting, MeetingFormData, AvailabilitySuggestion, Poll, Room, RoomAvailability } from '../types';
+import { buildDateTimeInTimeZone, getBrowserTimeZone } from '../utils/timezone';
 
 declare global {
   namespace NodeJS {
@@ -12,30 +12,25 @@ declare global {
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
 export class AISchedulerService {
-  private static async makeRequest<T>(
-    endpoint: string,
-    options: RequestInit = {}
-  ): Promise<T> {
+  private static authToken: string | null = localStorage.getItem('accessToken');
+
+  static setAuthToken(token: string | null) {
+    this.authToken = token;
+  }
+
+  private static async makeRequest<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
     const url = `${API_BASE_URL}${endpoint}`;
-    
-    // Get auth token
-    const token = authService.getToken();
-    
-    const defaultHeaders: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    
-    // Add Authorization header if token exists
-    if (token) {
-      defaultHeaders['Authorization'] = `Bearer ${token}`;
+    const headers = new Headers(options.headers || {});
+    if (!headers.has('Content-Type')) {
+      headers.set('Content-Type', 'application/json');
+    }
+    if (this.authToken) {
+      headers.set('Authorization', `Bearer ${this.authToken}`);
     }
 
     const response = await fetch(url, {
       ...options,
-      headers: {
-        ...defaultHeaders,
-        ...options.headers,
-      },
+      headers,
     });
 
     if (!response.ok) {
@@ -46,14 +41,91 @@ export class AISchedulerService {
     return response.json();
   }
 
-  static async getGoogleAuthUrl(): Promise<string> {
-    const { auth_url } = await this.makeRequest<{ auth_url: string }>(`/api/google/auth-url`);
-    return auth_url;
+  static async getGoogleAuthUrl(redirectUri?: string): Promise<{ auth_url: string }> {
+    const query = redirectUri ? `?redirect_uri=${encodeURIComponent(redirectUri)}` : '';
+    return this.makeRequest(`/api/auth/google/login${query}`);
   }
 
-  static async connectGoogle(): Promise<void> {
-    const url = await this.getGoogleAuthUrl();
-    window.location.href = url;
+  static async getCurrentUser(): Promise<any> {
+    return this.makeRequest('/api/me');
+  }
+
+  static async getCalendarEvents(timeMin: Date, timeMax: Date): Promise<any[]> {
+    const params = new URLSearchParams({
+      time_min: timeMin.toISOString(),
+      time_max: timeMax.toISOString(),
+    });
+    const { events } = await this.makeRequest<{ events: any[] }>(`/api/calendars/events?${params.toString()}`);
+    return events;
+  }
+
+  static async suggestAvailability(payload: {
+    participants: string[];
+    durationMinutes: number;
+    windowStart: Date;
+    windowEnd: Date;
+    slotIncrementMinutes?: number;
+    maxSuggestions?: number;
+    clientTimezone?: string;
+  }): Promise<{
+    suggestions: AvailabilitySuggestion[];
+    participants_missing: string[];
+    participants_missing_details: Record<string, string>;
+  }> {
+    const body = {
+      participants: payload.participants,
+      duration_minutes: payload.durationMinutes,
+      window_start: payload.windowStart.toISOString(),
+      window_end: payload.windowEnd.toISOString(),
+      slot_increment_minutes: payload.slotIncrementMinutes ?? 30,
+      max_suggestions: payload.maxSuggestions ?? 5,
+      client_timezone: payload.clientTimezone,
+    };
+    return this.makeRequest('/api/availability/suggest', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  static async createPoll(meetingId: string, options: { start: string; end: string }[], deadline?: Date): Promise<Poll> {
+    const payload = {
+      options: options.map(opt => ({ start_time: opt.start, end_time: opt.end })),
+      deadline: deadline ? deadline.toISOString() : undefined,
+    };
+    return this.makeRequest(`/api/meetings/${meetingId}/polls`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  static async getPoll(
+    pollId: string,
+    options?: { token?: string; voterEmail?: string }
+  ): Promise<Poll> {
+    const params = new URLSearchParams();
+    if (options?.token) {
+      params.set('token', options.token);
+    }
+    if (options?.voterEmail) {
+      params.set('voter_email', options.voterEmail);
+    }
+    const query = params.toString();
+    const path = query ? `/api/polls/${pollId}?${query}` : `/api/polls/${pollId}`;
+    return this.makeRequest(path);
+  }
+
+  static async votePoll(pollId: string, optionId: string, token?: string, voterEmail?: string): Promise<Poll> {
+    return this.makeRequest(`/api/polls/${pollId}/vote`, {
+      method: 'POST',
+      body: JSON.stringify({ option_id: optionId, token, voter_email: voterEmail }),
+    });
+  }
+
+  static async finalizePoll(pollId: string, optionId?: string): Promise<Poll> {
+    return this.makeRequest(`/api/polls/${pollId}/finalize`, {
+      method: 'POST',
+      body: JSON.stringify({ option_id: optionId }),
+    });
   }
 
   static async getMeetings(): Promise<Meeting[]> {
@@ -67,26 +139,36 @@ export class AISchedulerService {
   }
 
   static async createMeeting(formData: MeetingFormData): Promise<Meeting> {
-    // Parse the date string manually to avoid timezone issues
-    const [year, month, day] = formData.preferredDate.split('-').map(Number);
-    const meetingDate = new Date(year, month - 1, day); // month is 0-indexed in Date constructor
-    const startTimeStr = formData.startTime;
-    const endTimeStr = formData.endTime;
-    
-    // Create start datetime by combining date with start time
-    // Use local timezone to avoid UTC conversion issues
-    const startTime = new Date(meetingDate.getFullYear(), meetingDate.getMonth(), meetingDate.getDate());
-    const [startHour, startMinute] = startTimeStr.split(':').map(Number);
-    startTime.setHours(startHour, startMinute, 0, 0);
-    
-    // Create end datetime by combining date with end time
-    const endTime = new Date(meetingDate.getFullYear(), meetingDate.getMonth(), meetingDate.getDate());
-    const [endHour, endMinute] = endTimeStr.split(':').map(Number);
-    endTime.setHours(endHour, endMinute, 0, 0);
+    const resolvedTZ = formData.clientTimezone || getBrowserTimeZone();
+    const startTime = buildDateTimeInTimeZone(formData.preferredDate, formData.startTime, resolvedTZ);
+    const endTime = buildDateTimeInTimeZone(formData.preferredDate, formData.endTime, resolvedTZ);
+    const preferredDateTime = buildDateTimeInTimeZone(formData.preferredDate, '00:00', resolvedTZ);
 
-    // Convert preferred_date to datetime format
-    const [prefYear, prefMonth, prefDay] = formData.preferredDate.split('-').map(Number);
-    const preferredDateTime = new Date(prefYear, prefMonth - 1, prefDay, 0, 0, 0, 0);
+    if (!startTime || !endTime || !preferredDateTime) {
+      throw new Error('Invalid date or time selection.');
+    }
+
+    const metadata: Record<string, any> = {
+      preferred_time_slots: formData.preferredTimeSlots?.map(slot => ({
+        start: slot.start.toISOString(),
+        end: slot.end.toISOString(),
+        is_available: slot.isAvailable,
+      })) || [],
+      location_type: formData.locationType,
+      duration_minutes: formData.durationMinutes,
+    };
+    if (formData.locationType === 'onsite' && formData.roomId) {
+      metadata.room_id = formData.roomId;
+    }
+    metadata.requested_timezone = resolvedTZ;
+    metadata.timezone = resolvedTZ;
+    metadata.manual_time_mode = Boolean(formData.manualTimeMode);
+    if (formData.pollPending) {
+      metadata.poll_pending = true;
+    }
+    if (formData.selectedSuggestionStart) {
+      metadata.selected_suggestion_start = formData.selectedSuggestionStart;
+    }
 
     const apiData = {
       title: formData.title,
@@ -95,13 +177,7 @@ export class AISchedulerService {
       start_time: startTime.toISOString(),
       end_time: endTime.toISOString(),
       preferred_date: preferredDateTime.toISOString(),
-      metadata: {
-        preferred_time_slots: formData.preferredTimeSlots?.map(slot => ({
-          start: slot.start.toISOString(),
-          end: slot.end.toISOString(),
-          is_available: slot.isAvailable
-        })) || []
-      }
+      metadata,
     };
 
     const meeting = await this.makeRequest<any>('/api/meetings', {
@@ -119,7 +195,7 @@ export class AISchedulerService {
       start_time: updateData.startTime ? updateData.startTime.toISOString() : undefined,
       end_time: updateData.endTime ? updateData.endTime.toISOString() : undefined,
       status: updateData.status,
-      metadata: updateData.metadata
+      metadata: updateData.metadata,
     };
     if (participantsEmails) {
       apiData.participants_emails = participantsEmails;
@@ -140,57 +216,29 @@ export class AISchedulerService {
   }
 
   static async sendMeetingInvitation(meeting: Meeting): Promise<void> {
-    try {
-      const response = await this.makeRequest(`/api/meetings/${meeting.id}/send-invitation`, {
-        method: 'POST',
-      });
-      
-      console.log('Meeting invitations sent:', response);
-    } catch (error) {
-      console.error('Failed to send meeting invitations:', error);
-      throw error;
-    }
+    await this.makeRequest(`/api/meetings/${meeting.id}/send-invitation`, {
+      method: 'POST',
+    });
   }
 
   static async sendReminder(meetingId: string): Promise<void> {
-    try {
-      const response = await this.makeRequest(`/api/meetings/${meetingId}/send-reminder`, {
-        method: 'POST',
-      });
-      
-      console.log('Meeting reminders sent:', response);
-    } catch (error) {
-      console.error('Failed to send meeting reminders:', error);
-      throw error;
-    }
+    await this.makeRequest(`/api/meetings/${meetingId}/send-reminder`, {
+      method: 'POST',
+    });
   }
 
   static async sendUpdateNotification(meetingId: string, changesDescription: string): Promise<void> {
-    try {
-      const response = await this.makeRequest(`/api/meetings/${meetingId}/send-update`, {
-        method: 'POST',
-        body: JSON.stringify({ changes_description: changesDescription }),
-      });
-      
-      console.log('Meeting update notifications sent:', response);
-    } catch (error) {
-      console.error('Failed to send meeting update notifications:', error);
-      throw error;
-    }
+    await this.makeRequest(`/api/meetings/${meetingId}/send-update`, {
+      method: 'POST',
+      body: JSON.stringify({ changes_description: changesDescription }),
+    });
   }
 
   static async sendCancellationNotification(meetingId: string, cancellationReason: string): Promise<void> {
-    try {
-      const response = await this.makeRequest(`/api/meetings/${meetingId}/send-cancellation`, {
-        method: 'POST',
-        body: JSON.stringify({ cancellation_reason: cancellationReason }),
-      });
-      
-      console.log('Meeting cancellation notifications sent:', response);
-    } catch (error) {
-      console.error('Failed to send meeting cancellation notifications:', error);
-      throw error;
-    }
+    await this.makeRequest(`/api/meetings/${meetingId}/send-cancellation`, {
+      method: 'POST',
+      body: JSON.stringify({ cancellation_reason: cancellationReason }),
+    });
   }
 
   static async generateMeetLink(meetingId: string): Promise<Meeting> {
@@ -208,63 +256,36 @@ export class AISchedulerService {
     return this.transformMeetingFromAPI(meeting);
   }
 
-  static async findCommonFreeTime(
-    participants: Participant[],
-    duration: number,
-    preferredDate: Date
-  ): Promise<TimeSlot | null> {
-    // This would typically call an AI service or availability service
-    // For now, we'll simulate finding a common time
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    const startHour = 9;
-    const endHour = 17;
-    
-    const availableSlots: TimeSlot[] = [];
-    for (let hour = startHour; hour < endHour - Math.ceil(duration / 60); hour++) {
-      const start = new Date(preferredDate);
-      start.setHours(hour, 0, 0, 0);
-      
-      const end = new Date(start);
-      end.setMinutes(end.getMinutes() + duration);
-      
-      availableSlots.push({
-        start,
-        end,
-        isAvailable: true
-      });
-    }
-    
-    return availableSlots[0] || null;
+  static async getRooms(): Promise<Room[]> {
+    return this.makeRequest('/api/rooms');
   }
 
-  static async rescheduleMeeting(meeting: Meeting, newTimeSlot: TimeSlot): Promise<Meeting> {
-    const updatedMeeting = await this.updateMeeting(
+  static async getRoomAvailability(startTime: Date, endTime: Date, excludeMeetingId?: string): Promise<RoomAvailability[]> {
+    const params = new URLSearchParams({
+      start_time: startTime.toISOString(),
+      end_time: endTime.toISOString(),
+    });
+    if (excludeMeetingId) {
+      params.append('exclude_meeting_id', excludeMeetingId);
+    }
+    const { rooms } = await this.makeRequest<{ rooms: RoomAvailability[] }>(`/api/rooms/availability?${params.toString()}`);
+    return rooms;
+  }
+
+  static async rescheduleMeeting(meeting: Meeting, newSlot: { start: Date; end: Date }): Promise<Meeting> {
+    const metadata = { ...(meeting.metadata || {}) };
+    return this.updateMeeting(
       meeting.id,
       {
-        startTime: newTimeSlot.start,
-        endTime: newTimeSlot.end,
-        status: 'rescheduled',
-        metadata: meeting.metadata,
-      }
+        startTime: newSlot.start,
+        endTime: newSlot.end,
+        metadata,
+      },
+      meeting.participants.map(p => p.email)
     );
-    
-    // Send new invitation
-    await this.sendMeetingInvitation(updatedMeeting);
-    
-    return updatedMeeting;
   }
 
-  // Helper method to transform API response to frontend format
   private static transformMeetingFromAPI(apiMeeting: any): Meeting {
-    const parseDate = (value: string | Date | undefined | null): Date => {
-      if (!value) return new Date(NaN);
-      if (value instanceof Date) return value;
-      const hasTimezone = /[zZ]|[+-]\d{2}:?\d{2}$/.test(value);
-      const normalized = hasTimezone ? value : `${value}Z`;
-      return new Date(normalized);
-    };
-
     return {
       id: apiMeeting.id || apiMeeting._id,
       title: apiMeeting.title,
@@ -274,31 +295,26 @@ export class AISchedulerService {
         name: p.name,
         email: p.email,
         availability: p.availability?.map((a: any) => ({
-          start: parseDate(a.start),
-          end: parseDate(a.end),
-          isAvailable: a.is_available
-        })) || []
+          start: new Date(a.start),
+          end: new Date(a.end),
+          isAvailable: a.is_available,
+        })) || [],
       })) || [],
-      startTime: parseDate(apiMeeting.start_time),
-      endTime: parseDate(apiMeeting.end_time),
+      startTime: new Date(apiMeeting.start_time),
+      endTime: new Date(apiMeeting.end_time),
       duration: this.calculateDuration(apiMeeting.start_time, apiMeeting.end_time),
       status: apiMeeting.status,
+      organizerEmail: apiMeeting.organizer_email,
       createdAt: new Date(apiMeeting.created_at),
       updatedAt: new Date(apiMeeting.updated_at),
-      metadata: apiMeeting.metadata || {}
+      metadata: apiMeeting.metadata || {},
     };
   }
 
-  // Helper method to calculate duration from start and end times
   private static calculateDuration(startTime: string | Date, endTime: string | Date): number {
-    const parse = (value: string | Date): Date => {
-      if (value instanceof Date) return value;
-      const hasTimezone = /[zZ]|[+-]\d{2}:?\d{2}$/.test(value);
-      return new Date(hasTimezone ? value : `${value}Z`);
-      };
-    const start = parse(startTime);
-    const end = parse(endTime);
-    return Math.round((end.getTime() - start.getTime()) / (1000 * 60)); // Duration in minutes
+    const start = new Date(startTime);
+    const end = new Date(endTime);
+    return Math.round((end.getTime() - start.getTime()) / (1000 * 60));
   }
 
   // Event methods

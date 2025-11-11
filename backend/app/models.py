@@ -1,8 +1,11 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any, Annotated
 from pydantic import BaseModel, Field, BeforeValidator
 from bson import ObjectId
 import uuid
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 def validate_object_id(v):
     if isinstance(v, ObjectId):
@@ -43,8 +46,9 @@ class Meeting(MongoModel):
     end_time: datetime
     duration: int
     status: str = "scheduled"
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    organizer_email: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class MeetingCreate(BaseModel):
@@ -71,70 +75,61 @@ class Metadata(MongoModel):
     value: Any
     type: str
     description: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 class User(MongoModel):
     email: str
     name: str
+    google_sub: Optional[str] = None
+    picture: Optional[str] = None
+    calendars: Dict[str, Any] = Field(default_factory=dict)
     preferences: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    last_login_at: Optional[datetime] = None
 
-class Event(MongoModel):
-    title: str
-    description: Optional[str] = None
-    start_time: datetime
-    end_time: datetime
-    location: Optional[str] = None
-    category: Optional[str] = None
-    status: str = "scheduled"
-    creator_email: str  # Email of the user who created the event
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
 
-class EventCreate(BaseModel):
-    title: str
-    description: Optional[str] = None
-    start_time: datetime
-    end_time: datetime
-    location: Optional[str] = None
-    category: Optional[str] = None
-    creator_email: Optional[str] = None  # Will be set from authenticated user
-    metadata: Optional[Dict[str, Any]] = None
-
-class EventUpdate(BaseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-    start_time: Optional[datetime] = None
-    end_time: Optional[datetime] = None
-    location: Optional[str] = None
-    category: Optional[str] = None
-    status: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
-
-# Poll Models
 class PollOption(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    text: str
-    votes: List[str] = Field(default_factory=list)  # List of voter emails
+    start_time: datetime
+    end_time: datetime
+    votes: int = 0
 
-class Poll(MongoModel):
-    meeting_id: str  # Reference to meeting
-    question: str
-    options: List[PollOption]
-    creator_email: str  # Email of the meeting creator who created the poll
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
-    is_closed: bool = False  # Whether voting is closed
-
-class PollCreate(BaseModel):
-    meeting_id: str
-    question: str
-    options: List[str]  # List of option texts
 
 class PollVote(BaseModel):
-    poll_id: str
     option_id: str
     voter_email: str
+    voted_at: datetime = Field(default_factory=utcnow)
+
+
+class Poll(MongoModel):
+    meeting_id: str
+    organizer_email: str
+    options: List[PollOption]
+    votes: List[PollVote] = Field(default_factory=list)
+    status: str = Field(default="open")  # open | closed
+    deadline: Optional[datetime] = None
+    winning_option_id: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class Room(BaseModel):
+    id: str
+    name: str
+    capacity: int
+    location: str
+    features: List[str] = Field(default_factory=list)
+    notes: Optional[str] = None
+
+
+class RoomAvailability(BaseModel):
+    id: str
+    name: str
+    capacity: int
+    location: str
+    features: List[str] = Field(default_factory=list)
+    notes: Optional[str] = None
+    is_available: bool
+    conflicts: List[Dict[str, Any]] = Field(default_factory=list)

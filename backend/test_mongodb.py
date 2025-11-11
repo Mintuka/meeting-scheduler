@@ -1,6 +1,6 @@
 import pytest
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any
 
 from app.database import MongoDB
@@ -22,7 +22,7 @@ def sample_meeting_data():
         description="A test meeting",
         participants=["test@example.com", "user@example.com"],
         duration=60,
-        preferred_date=datetime.utcnow(),
+        preferred_date=datetime.now(timezone.utc),
         metadata={"test": True, "priority": "high"}
     )
 
@@ -148,7 +148,7 @@ class TestMeetingService:
             description="Another test meeting",
             participants=["user2@example.com"],
             duration=30,
-            preferred_date=datetime.utcnow(),
+            preferred_date=datetime.now(timezone.utc),
             metadata={"test": False}
         )
         await meeting_service.create_meeting(second_meeting_data, {})

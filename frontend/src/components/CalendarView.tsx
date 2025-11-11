@@ -1,0 +1,481 @@
+import React, { useMemo, useState } from 'react';
+import {
+  addDays,
+  addWeeks,
+  format,
+  isSameDay,
+  startOfWeek,
+} from 'date-fns';
+import { Meeting, Poll } from '../types';
+import {
+  formatFriendlyDateTime,
+  formatMonthDayTime,
+  formatTimeOnly,
+  getMeetingTimeZone,
+  getTimeZoneAbbreviation,
+} from '../utils/timezone';
+
+interface CalendarViewProps {
+  events: any[];
+  currentTime: Date;
+  pollSummaries?: Record<string, Poll | null | undefined>;
+  onEditMeeting?: (meeting: Meeting) => void;
+  onDeleteMeeting?: (meeting: Meeting) => void;
+  onViewMeeting?: (meeting: Meeting) => void;
+  className?: string;
+}
+
+interface NormalizedEvent {
+  id: string;
+  summary: string;
+  start: Date;
+  end: Date;
+  location?: string;
+  meeting?: Meeting;
+  source?: 'meeting' | 'calendar';
+}
+
+const normalizeEvents = (events: any[]): NormalizedEvent[] => {
+  const normalized: NormalizedEvent[] = [];
+
+  events.forEach((event) => {
+    const start = event.start?.dateTime
+      ? new Date(event.start.dateTime)
+      : event.start?.date
+        ? new Date(event.start.date)
+        : null;
+    const end = event.end?.dateTime
+      ? new Date(event.end.dateTime)
+      : event.end?.date
+        ? new Date(event.end.date)
+        : null;
+
+    if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      return;
+    }
+
+    normalized.push({
+      id: event.id || `${event.summary}-${start.toISOString()}`,
+      summary: event.summary || 'Untitled event',
+      start,
+      end,
+      location: event.location,
+      meeting: event.meeting,
+      source: event.source === 'meeting' ? 'meeting' : 'calendar',
+    });
+  });
+
+  return normalized.sort((a, b) => a.start.getTime() - b.start.getTime());
+};
+
+const getWeekdayOffset = (date: Date) => {
+  const jsDay = date.getDay(); // Sunday = 0
+  return (jsDay + 6) % 7; // convert so Monday = 0
+};
+
+export const CalendarView: React.FC<CalendarViewProps> = ({
+  events,
+  currentTime,
+  pollSummaries,
+  onEditMeeting,
+  onDeleteMeeting,
+  onViewMeeting,
+  className,
+}) => {
+  const normalizedEvents = useMemo(() => normalizeEvents(events), [events]);
+  const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date(), { weekStartsOn: 1 }));
+  const [selectedDate, setSelectedDate] = useState<Date>(() => new Date());
+  const timezone = useMemo(() => Intl.DateTimeFormat().resolvedOptions().timeZone, []);
+  const today = new Date();
+  const weekDays = Array.from({ length: 7 }, (_, index) => addDays(weekStart, index));
+  const selectedEvents = useMemo(
+    () => normalizedEvents.filter((event) => selectedDate && isSameDay(event.start, selectedDate)),
+    [normalizedEvents, selectedDate]
+  );
+
+  const handleMonthInput = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const value = event.target.value;
+    if (!value) return;
+    const [year, month] = value.split('-').map(Number);
+    const jumpDate = new Date(year, month - 1, 1);
+    const newWeekStart = startOfWeek(jumpDate, { weekStartsOn: 1 });
+    setWeekStart(newWeekStart);
+    setSelectedDate(jumpDate);
+  };
+
+  const shiftWeek = (direction: number) => {
+    const nextWeek = addWeeks(weekStart, direction);
+    setWeekStart(nextWeek);
+    setSelectedDate((prev) => {
+      if (!prev) {
+        return addDays(nextWeek, 0);
+      }
+      const offset = getWeekdayOffset(prev);
+      return addDays(nextWeek, offset);
+    });
+  };
+
+  const renderDayEvents = (day: Date) => {
+    const dayEvents = normalizedEvents.filter((event) => isSameDay(event.start, day));
+    if (dayEvents.length === 0) {
+      return <p className="text-[11px] text-gray-400">No events</p>;
+    }
+    return (
+      <div className="space-y-1">
+        {dayEvents.map((event) => (
+          <div
+            key={`${event.id}-${event.start.toISOString()}`}
+            className="text-[11px] bg-blue-50 text-blue-900 rounded px-1 py-0.5 truncate"
+          >
+            <p className="font-medium truncate">{event.summary}</p>
+            <p>
+              {format(event.start, 'h:mm a')} – {format(event.end, 'h:mm a')}
+            </p>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  const computeMeetingStatus = (meeting: Meeting): Meeting['status'] => {
+    if (meeting.status === 'cancelled') return 'cancelled';
+    if (meeting.metadata?.poll_pending || meeting.status === 'polling') return 'polling';
+    if (meeting.startTime <= currentTime && meeting.endTime > currentTime) return 'running';
+    if (meeting.endTime <= currentTime) return 'completed';
+    if (meeting.status === 'rescheduled') return 'rescheduled';
+    return meeting.status;
+  };
+
+  const renderStatusBadge = (status: Meeting['status']) => {
+    const colors: Record<Meeting['status'], string> = {
+      scheduled: 'bg-blue-100 text-blue-800',
+      confirmed: 'bg-green-100 text-green-800',
+      cancelled: 'bg-red-100 text-red-800',
+      rescheduled: 'bg-yellow-100 text-yellow-800',
+      running: 'bg-purple-100 text-purple-800',
+      completed: 'bg-gray-200 text-gray-700',
+      polling: 'bg-orange-100 text-orange-800',
+    };
+    return (
+      <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${colors[status] || 'bg-gray-100 text-gray-700'}`}>
+        {status.charAt(0).toUpperCase() + status.slice(1)}
+      </span>
+    );
+  };
+
+  const renderMeetingCard = (event: NormalizedEvent) => {
+    const meeting = event.meeting;
+    if (!meeting) {
+      return (
+        <div className="border rounded-lg p-4 bg-gray-50 text-sm text-gray-700 space-y-1">
+          <div className="flex items-center justify-between">
+            <p className="font-medium text-gray-900">{event.summary}</p>
+            <span className="text-xs text-gray-500">Google Calendar</span>
+          </div>
+          <p className="text-sm text-gray-600">
+            {format(event.start, 'h:mm a')} – {format(event.end, 'h:mm a')}
+          </p>
+          {event.location && <p className="text-xs text-gray-500 mt-1">{event.location}</p>}
+        </div>
+      );
+    }
+
+    const status = computeMeetingStatus(meeting);
+    const meetingTimeZone = getMeetingTimeZone(meeting);
+    const locationType = (meeting.metadata?.location_type as 'online' | 'onsite') || 'online';
+    const locationLabel =
+      locationType === 'onsite'
+        ? meeting.metadata?.room_name || 'Onsite'
+        : 'Google Meet';
+    const locationSubtext =
+      locationType === 'onsite'
+        ? meeting.metadata?.room_location || 'Office'
+        : meeting.metadata?.meeting_url
+        ? 'Link ready'
+        : 'Link shared via invitation';
+
+    const canModify = !['completed', 'cancelled'].includes(status);
+    const canJoin = canModify && meeting.metadata?.meeting_url && locationType === 'online';
+    const participantsPreview = meeting.participants.slice(0, 4);
+    const extraParticipants = meeting.participants.length - participantsPreview.length;
+    const pollId = meeting.metadata?.poll_id as string | undefined;
+    const pollSummary = pollId ? pollSummaries?.[pollId] : undefined;
+    const isPollOpen = meeting.metadata?.poll_pending || (pollSummary?.status === 'open');
+    const pollStatusLabel = pollSummary
+      ? pollSummary.status === 'open'
+        ? 'Open for votes'
+        : pollSummary.winning_option_id
+        ? 'Poll finalized'
+        : 'Closed · awaiting organizer'
+      : meeting.metadata?.poll_pending
+      ? 'Collecting responses'
+      : 'Loading poll details...';
+
+    const handleViewDetails = () => {
+      if (meeting && onViewMeeting) {
+        onViewMeeting(meeting);
+      }
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        handleViewDetails();
+      }
+    };
+
+    const stopPropagation = (event: React.MouseEvent | React.KeyboardEvent) => event.stopPropagation();
+
+    return (
+      <div
+        className="border rounded-xl p-5 bg-white shadow-sm space-y-4 hover:shadow transition focus:outline-none focus:ring-2 focus:ring-blue-400"
+        role={onViewMeeting ? 'button' : undefined}
+        tabIndex={onViewMeeting ? 0 : -1}
+        onClick={handleViewDetails}
+        onKeyDown={onViewMeeting ? handleKeyDown : undefined}
+      >
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <p className="font-semibold text-gray-900 text-base">{meeting.title}</p>
+            <p className="text-sm text-gray-600 flex items-center gap-1 flex-wrap">
+              {formatFriendlyDateTime(meeting.startTime, meetingTimeZone)} – {formatTimeOnly(meeting.endTime, meetingTimeZone)}
+              <span className="text-xs text-gray-500">({getTimeZoneAbbreviation(meeting.startTime, meetingTimeZone)})</span>
+            </p>
+          </div>
+          {renderStatusBadge(status)}
+        </div>
+        {meeting.description && (
+          <div className="flex gap-3 text-sm text-gray-600">
+            <span className="w-1 rounded-full bg-blue-200" />
+            <p className="flex-1">
+            {meeting.description.length > 180 ? `${meeting.description.slice(0, 177)}…` : meeting.description}
+            </p>
+          </div>
+        )}
+        {locationType === 'onsite' && (
+          <div className="rounded-lg border border-gray-100 p-3 bg-gray-50 text-sm text-gray-700 space-y-1">
+            <div className="font-medium">{locationLabel}</div>
+            <p className="text-xs text-gray-500">{locationSubtext}</p>
+          </div>
+        )}
+        <div>
+          <p className="text-xs uppercase text-gray-500 mb-1">Participants</p>
+          <div className="flex items-center gap-3">
+            <div className="flex -space-x-2">
+              {participantsPreview.map((participant) => (
+                <div
+                  key={participant.email}
+                  className="h-8 w-8 rounded-full bg-gradient-to-br from-blue-100 to-blue-200 text-blue-700 flex items-center justify-center text-xs font-semibold border border-white"
+                  title={participant.name || participant.email}
+                >
+                  {(participant.name || participant.email).charAt(0).toUpperCase()}
+                </div>
+              ))}
+            </div>
+            {extraParticipants > 0 && (
+              <span className="text-xs text-gray-500">+{extraParticipants} more</span>
+            )}
+          </div>
+          <p className="text-xs text-gray-500 mt-1">
+            Organized by {meeting.organizerEmail || 'you'}
+          </p>
+        </div>
+        {pollId && (
+          <div className="rounded-lg border border-purple-100 p-3 bg-purple-50 text-sm text-purple-900 space-y-2">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div>
+                <p className="font-semibold text-purple-900">Poll</p>
+                <p className="text-xs text-purple-700">{pollStatusLabel}</p>
+              </div>
+              <a
+                href={`/poll/${pollId}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-3 py-1.5 text-xs font-semibold text-white bg-purple-600 rounded-md hover:bg-purple-700"
+                onClick={stopPropagation}
+              >
+                {isPollOpen ? 'Vote / view poll' : 'View poll'}
+              </a>
+            </div>
+            {pollSummary && pollSummary.options.length > 0 && (
+              <div className="space-y-1 text-xs text-purple-800">
+                {pollSummary.options.slice(0, 3).map((option) => {
+                  const start = new Date(option.start_time);
+                  const end = new Date(option.end_time);
+                  const isWinner = pollSummary.winning_option_id === option.id;
+                  return (
+                    <div key={option.id} className="flex items-center justify-between w-full">
+                      <span>
+                        {formatMonthDayTime(start, meetingTimeZone)} – {formatTimeOnly(end, meetingTimeZone)}
+                      </span>
+                      <span className={`font-semibold ${isWinner ? 'text-green-700' : ''}`}>
+                        {option.votes} votes{isWinner ? ' · chosen' : ''}
+                      </span>
+                    </div>
+                  );
+                })}
+                {pollSummary.options.length > 3 && (
+                  <p className="text-[11px] text-purple-600">
+                    +{pollSummary.options.length - 3} more options
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+        <div className="flex flex-wrap gap-2">
+          {canJoin && meeting.metadata?.meeting_url && (
+            <a
+              href={meeting.metadata.meeting_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center justify-center px-3 py-2 text-xs font-semibold text-white bg-blue-600 rounded-md hover:bg-blue-700"
+              onClick={stopPropagation}
+            >
+              Join Meeting
+            </a>
+          )}
+          {onEditMeeting && canModify && (
+            <button
+              type="button"
+              className="inline-flex items-center px-3 py-2 text-xs font-semibold text-blue-600 bg-blue-50 rounded-md hover:bg-blue-100"
+              onClick={(e) => {
+                stopPropagation(e);
+                onEditMeeting(meeting);
+              }}
+            >
+              Edit
+            </button>
+          )}
+          {onDeleteMeeting && canModify && (
+            <button
+              type="button"
+              className="inline-flex items-center px-3 py-2 text-xs font-semibold text-red-600 bg-red-50 rounded-md hover:bg-red-100"
+              onClick={(e) => {
+                stopPropagation(e);
+                onDeleteMeeting(meeting);
+              }}
+            >
+              Delete
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const containerClass = ['bg-white rounded-lg shadow p-4 h-full', className].filter(Boolean).join(' ');
+
+  return (
+    <div className={containerClass}>
+      <div className="flex flex-col h-full">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-4">
+          <div>
+            <h3 className="text-2xl font-semibold text-gray-900">
+              {format(weekStart, 'MMM d')} – {format(addDays(weekStart, 6), 'MMM d, yyyy')}
+            </h3>
+            <p className="text-xs text-gray-500 mt-1">Your timezone: {timezone}</p>
+          </div>
+          <div className="flex flex-wrap gap-2 items-center">
+            <button
+              type="button"
+              onClick={() => shiftWeek(-1)}
+              className="px-3 py-2 border rounded-md text-sm text-gray-700 hover:bg-gray-50"
+            >
+              ← Previous week
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const todayWeek = startOfWeek(new Date(), { weekStartsOn: 1 });
+                setWeekStart(todayWeek);
+                setSelectedDate(new Date());
+              }}
+              className="px-3 py-2 border rounded-md text-sm text-gray-700 hover:bg-gray-50"
+            >
+              Today
+            </button>
+            <button
+              type="button"
+              onClick={() => shiftWeek(1)}
+              className="px-3 py-2 border rounded-md text-sm text-gray-700 hover:bg-gray-50"
+            >
+              Next week →
+            </button>
+            <input
+              type="month"
+              value={format(weekStart, 'yyyy-MM')}
+              onChange={handleMonthInput}
+              className="px-3 py-2 border rounded-md text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            />
+          </div>
+        </div>
+
+        <div className="flex flex-col lg:flex-row gap-6 flex-1 overflow-hidden">
+          <section className="lg:w-3/5 flex-shrink-0 flex flex-col overflow-hidden h-full lg:min-h-0">
+            <div className="overflow-x-auto flex-none">
+              <div className="grid grid-cols-7 min-w-[640px] text-xs font-semibold text-gray-500 border-b border-gray-100 pb-2">
+                {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((label) => (
+                  <div key={label} className="text-center uppercase tracking-wide">
+                    {label}
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="mt-2 flex-1 overflow-x-auto lg:overflow-hidden lg:min-h-0">
+              <div className="grid grid-cols-7 gap-2 min-w-[640px] h-full">
+                {weekDays.map((day) => {
+                  const isToday = isSameDay(day, today);
+                  const isSelected = isSameDay(selectedDate, day);
+                  return (
+                    <button
+                      key={day.toISOString()}
+                      type="button"
+                      onClick={() => setSelectedDate(day)}
+                      className={[
+                        'border rounded-xl p-3 text-left transition-all h-full min-h-[220px] flex flex-col bg-white',
+                        isSelected
+                          ? 'border-2 border-blue-500 shadow-sm'
+                          : 'border-gray-200 hover:border-blue-300',
+                        isToday && !isSelected ? 'bg-blue-50 border-blue-200' : '',
+                      ].join(' ')}
+                    >
+                      <div className="flex items-center text-sm gap-2">
+                        {isToday && (
+                          <span className="inline-flex h-2.5 w-2.5 items-center justify-center" aria-label="Today">
+                            <span className="block h-2.5 w-2.5 rounded-full bg-blue-500"></span>
+                          </span>
+                        )}
+                        <span className={`font-medium ${isToday ? 'text-blue-700' : 'text-gray-900'}`}>
+                          {format(day, 'EEE d')}
+                        </span>
+                      </div>
+                      <div className="mt-2 overflow-y-auto pr-1 flex-1">{renderDayEvents(day)}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </section>
+
+          <section className="lg:flex-1 flex flex-col bg-gray-50 rounded-lg p-4 border border-gray-100 overflow-hidden h-full lg:min-h-0">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs uppercase tracking-wide text-gray-500">Selected day</p>
+                <h4 className="text-lg font-semibold text-gray-900">{format(selectedDate, 'EEEE, MMMM d, yyyy')}</h4>
+              </div>
+              <span className="text-xs text-gray-500">{selectedEvents.length} events</span>
+            </div>
+            <div className="mt-4 flex-1 overflow-y-auto space-y-3 pr-1">
+              {selectedEvents.length === 0 ? (
+                <p className="text-sm text-gray-500">No events scheduled for this day.</p>
+              ) : (
+                selectedEvents.map((event) => <div key={`${event.id}-${event.start.toISOString()}`}>{renderMeetingCard(event)}</div>)
+              )}
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+};

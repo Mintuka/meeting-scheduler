@@ -4,7 +4,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 import os
 import logging
@@ -304,7 +304,7 @@ class EmailNotificationService:
             meeting_time = f"{meeting.start_time.strftime('%I:%M %p')} - {meeting.end_time.strftime('%I:%M %p')}"
             
             # Calculate time until meeting
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             time_until = meeting.start_time - now
             hours = int(time_until.total_seconds() // 3600)
             minutes = int((time_until.total_seconds() % 3600) // 60)
@@ -390,6 +390,35 @@ class EmailNotificationService:
         for participant in meeting.participants:
             results[participant.email] = await self.send_meeting_reminder(meeting, participant, hours_before)
         return results
+
+    async def send_poll_invitation(self, meeting: Meeting, participant: Participant, poll_url: str) -> bool:
+        try:
+            subject = f"[MS-{meeting.id}] Vote on meeting times for {meeting.title}"
+            html_content = f"""
+            <p>Hello {participant.name},</p>
+            <p>The organizer is collecting availability for <strong>{meeting.title}</strong>.</p>
+            <p>Please vote for your preferred time here: <a href="{poll_url}">{poll_url}</a></p>
+            <p>Thank you!</p>
+            """
+            return await self.send_email(participant.email, subject, html_content)
+        except Exception as exc:
+            logger.error(f"Failed to send poll invitation: {exc}")
+            return False
+
+    async def send_poll_finalized(self, meeting: Meeting, participant: Participant, option) -> bool:
+        try:
+            subject = f"[MS-{meeting.id}] Meeting finalized: {meeting.title}"
+            start = option.start_time.strftime("%A, %B %d %Y %I:%M %p")
+            end = option.end_time.strftime("%I:%M %p")
+            html_content = f"""
+            <p>Hello {participant.name},</p>
+            <p>The meeting <strong>{meeting.title}</strong> has been scheduled for {start} - {end}.</p>
+            <p>See you then!</p>
+            """
+            return await self.send_email(participant.email, subject, html_content)
+        except Exception as exc:
+            logger.error(f"Failed to send poll finalized notification: {exc}")
+            return False
 
 # Global notification service instance
 notification_service = EmailNotificationService()

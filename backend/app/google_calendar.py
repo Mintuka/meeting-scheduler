@@ -13,6 +13,10 @@ from google_auth_oauthlib.flow import Flow
 
 SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
 ]
 
 # Scopes for user authentication (profile and email)
@@ -86,6 +90,7 @@ def credentials_to_dict(creds: Credentials) -> Dict[str, Any]:
         "client_secret": creds.client_secret,
         "scopes": list(creds.scopes or SCOPES),
         "expiry": creds.expiry.isoformat() if creds.expiry else None,
+        "id_token": getattr(creds, "id_token", None),
     }
 
 
@@ -154,6 +159,48 @@ def create_event_with_meet(
         event_id=created.get("id"),
         html_link=created.get("htmlLink"),
         meet_url=meet_url,
+    )
+
+
+def create_calendar_event(
+    creds_dict: Dict[str, Any],
+    *,
+    title: str,
+    description: str,
+    start_time: datetime,
+    end_time: datetime,
+    attendees: List[str],
+    timezone: str = "UTC",
+    location: Optional[str] = None,
+    send_updates: str = "all",
+) -> CreatedEvent:
+    creds = dict_to_credentials(creds_dict)
+    service = build("calendar", "v3", credentials=creds)
+
+    body: Dict[str, Any] = {
+        "summary": title,
+        "description": description,
+        "start": {"dateTime": start_time.isoformat(), "timeZone": timezone},
+        "end": {"dateTime": end_time.isoformat(), "timeZone": timezone},
+        "attendees": [{"email": e} for e in attendees],
+    }
+    if location:
+        body["location"] = location
+
+    created = (
+        service.events()
+        .insert(
+            calendarId="primary",
+            body=body,
+            sendUpdates=send_updates,
+        )
+        .execute()
+    )
+
+    return CreatedEvent(
+        event_id=created.get("id"),
+        html_link=created.get("htmlLink"),
+        meet_url=None,
     )
 
 
@@ -229,3 +276,19 @@ def update_event(
         .execute()
     )
     return updated
+
+
+def delete_event(
+    creds_dict: Dict[str, Any],
+    *,
+    event_id: str,
+    send_updates: str = "all",
+) -> None:
+    """Delete a Google Calendar event."""
+    creds = dict_to_credentials(creds_dict)
+    service = build("calendar", "v3", credentials=creds)
+    service.events().delete(
+        calendarId="primary",
+        eventId=event_id,
+        sendUpdates=send_updates,
+    ).execute()

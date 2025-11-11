@@ -1,4 +1,5 @@
 import os
+from datetime import timezone
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import ConnectionFailure
 from typing import Optional
@@ -17,7 +18,11 @@ class MongoDB:
             mongo_url = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
             database_name = os.getenv("MONGODB_DATABASE", "meeting_scheduler")
             
-            cls.client = AsyncIOMotorClient(mongo_url)
+            cls.client = AsyncIOMotorClient(
+                mongo_url,
+                tz_aware=True,
+                tzinfo=timezone.utc,
+            )
             cls.database = cls.client[database_name]
             
             await cls.client.admin.command('ping')
@@ -56,10 +61,6 @@ def get_metadata_collection():
     """Get the metadata collection."""
     return MongoDB.get_collection("metadata")
 
-def get_events_collection():
-    """Get the events collection."""
-    return MongoDB.get_collection("events")
 
 def get_polls_collection():
-    """Get the polls collection."""
     return MongoDB.get_collection("polls")
