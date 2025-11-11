@@ -5,6 +5,8 @@ import { MeetingForm } from './MeetingForm';
 import { MeetingDetails } from './MeetingDetails';
 import { Modal } from './Modal';
 import { EditMeetingForm } from './EditMeetingForm';
+import { EditEventForm } from './EditEventForm';
+import { UserProfileDropdown } from './UserProfileDropdown';
 import { AISchedulerService } from '../services/AISchedulerService';
 import { notificationService } from '../services/NotificationService';
 import { useAuth } from '../context/AuthContext';
@@ -15,6 +17,7 @@ export const Dashboard: React.FC = () => {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [pollSummaries, setPollSummaries] = useState<Record<string, Poll | null>>({});
   const [showForm, setShowForm] = useState(false);
+  const [showEventForm, setShowEventForm] = useState(false);
   const [editMeeting, setEditMeeting] = useState<Meeting | null>(null);
   const [viewMeeting, setViewMeeting] = useState<Meeting | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -33,6 +36,79 @@ export const Dashboard: React.FC = () => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
+
+  // Load meetings and events when user changes
+  useEffect(() => {
+    if (user) {
+      // User is authenticated, fetch data
+      loadMeetings();
+      loadEvents();
+    } else {
+      // User is not authenticated, clear data immediately
+      setMeetings([]);
+      setEvents([]);
+      setIsLoading(false); // Make sure loading is false when not authenticated
+    }
+  }, [user]);
+
+  const checkAuth = async () => {
+    try {
+      setIsAuthLoading(true);
+      const currentUser = authService.getUser();
+      const token = authService.getToken();
+      
+      if (currentUser && token) {
+        // Verify token is still valid by fetching user info
+        try {
+          const userInfo = await authService.getCurrentUser();
+          if (userInfo) {
+            setUser(userInfo);
+          } else {
+            // Token invalid, clear auth
+            authService.clearAuth();
+            setUser(null);
+            setMeetings([]);
+            setEvents([]);
+          }
+        } catch (error) {
+          // Token validation failed, clear auth
+          console.error('Token validation failed:', error);
+          authService.clearAuth();
+          setUser(null);
+          setMeetings([]);
+          setEvents([]);
+        }
+      } else {
+        // No user or token, ensure clean state
+        setUser(null);
+        setMeetings([]);
+        setEvents([]);
+      }
+    } catch (error) {
+      console.error('Auth check failed:', error);
+      authService.clearAuth();
+      setUser(null);
+      setMeetings([]);
+      setEvents([]);
+    } finally {
+      setIsAuthLoading(false);
+      setIsLoading(false); // Ensure loading is false after auth check
+    }
+  };
+
+  const handleSignIn = async () => {
+    try {
+      await authService.signInWithGoogle();
+    } catch (error) {
+      console.error('Sign in failed:', error);
+      notificationService.error('Sign In Error', 'Failed to initiate Google sign in. Please try again.');
+    }
+  };
+
+  const handleLogout = () => {
+    setUser(null);
+    notificationService.info('Logged Out', 'You have been successfully logged out.');
+  };
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -65,6 +141,13 @@ export const Dashboard: React.FC = () => {
   }, [meetings, pollSummaries]);
 
   const loadMeetings = async () => {
+    // Only load meetings if user is authenticated
+    if (!user) {
+      setMeetings([]);
+      setIsLoading(false);
+      return;
+    }
+    
     try {
       setIsLoading(true);
       setError(null);
@@ -73,12 +156,21 @@ export const Dashboard: React.FC = () => {
         return;
       }
       const fetchedMeetings = await AISchedulerService.getMeetings();
-      setMeetings(fetchedMeetings);
-    } catch (err) {
+      setMeetings(fetchedMeetings || []);
+    } catch (err: any) {
       console.error('Error loading meetings:', err);
-      const errorMessage = 'Failed to load meetings. Please try again.';
+      const errorMessage = err.message || 'Failed to load meetings. Please try again.';
+      
+      // Don't show error if user is not authenticated or if it's a 401
+      if (errorMessage.includes('401') || errorMessage.includes('Not authenticated')) {
+        setMeetings([]);
+        setIsLoading(false);
+        return;
+      }
+      
       setError(errorMessage);
       notificationService.error('Load Error', errorMessage);
+      setMeetings([]);
     } finally {
       setIsLoading(false);
     }
@@ -197,7 +289,7 @@ export const Dashboard: React.FC = () => {
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-          <p className="text-gray-600">Loading meetings...</p>
+          <p className="text-gray-600">{isAuthLoading ? 'Checking authentication...' : 'Loading data...'}</p>
         </div>
       </div>
     );
@@ -313,6 +405,7 @@ export const Dashboard: React.FC = () => {
             onViewMeeting={setViewMeeting}
           />
         </div>
+      )}
 
         {/* Meeting Form Modal */}
         <Modal

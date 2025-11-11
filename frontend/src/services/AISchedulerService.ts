@@ -316,4 +316,162 @@ export class AISchedulerService {
     const end = new Date(endTime);
     return Math.round((end.getTime() - start.getTime()) / (1000 * 60));
   }
+
+  // Event methods
+  static async getEvents(): Promise<Event[]> {
+    const events = await this.makeRequest<any[]>('/api/events');
+    return events.map(event => this.transformEventFromAPI(event));
+  }
+
+  static async getEvent(eventId: string): Promise<Event> {
+    const event = await this.makeRequest<any>(`/api/events/${eventId}`);
+    return this.transformEventFromAPI(event);
+  }
+
+  static async createEvent(formData: EventFormData): Promise<Event> {
+    // Parse the date string manually to avoid timezone issues
+    const [year, month, day] = formData.eventDate.split('-').map(Number);
+    const eventDate = new Date(year, month - 1, day);
+    const startTimeStr = formData.startTime;
+    const endTimeStr = formData.endTime;
+    
+    // Create start datetime by combining date with start time
+    const startTime = new Date(eventDate.getFullYear(), eventDate.getMonth(), eventDate.getDate());
+    const [startHour, startMinute] = startTimeStr.split(':').map(Number);
+    startTime.setHours(startHour, startMinute, 0, 0);
+    
+    // Create end datetime by combining date with end time
+    const endTime = new Date(eventDate.getFullYear(), eventDate.getMonth(), eventDate.getDate());
+    const [endHour, endMinute] = endTimeStr.split(':').map(Number);
+    endTime.setHours(endHour, endMinute, 0, 0);
+
+    const apiData = {
+      title: formData.title,
+      description: formData.description || undefined,
+      start_time: startTime.toISOString(),
+      end_time: endTime.toISOString(),
+      location: formData.location || undefined,
+      category: formData.category || undefined,
+    };
+
+    const event = await this.makeRequest<any>('/api/events', {
+      method: 'POST',
+      body: JSON.stringify(apiData),
+    });
+
+    return this.transformEventFromAPI(event);
+  }
+
+  static async updateEvent(eventId: string, updateData: Partial<Event>): Promise<Event> {
+    const apiData: any = {
+      title: updateData.title,
+      description: updateData.description,
+      start_time: updateData.startTime ? updateData.startTime.toISOString() : undefined,
+      end_time: updateData.endTime ? updateData.endTime.toISOString() : undefined,
+      location: updateData.location,
+      category: updateData.category,
+      status: updateData.status,
+      metadata: updateData.metadata
+    };
+
+    const event = await this.makeRequest<any>(`/api/events/${eventId}`, {
+      method: 'PUT',
+      body: JSON.stringify(apiData),
+    });
+
+    return this.transformEventFromAPI(event);
+  }
+
+  static async deleteEvent(eventId: string): Promise<void> {
+    await this.makeRequest(`/api/events/${eventId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  // Helper method to transform API response to frontend format
+  private static transformEventFromAPI(apiEvent: any): Event {
+    const parseDate = (value: string | Date | undefined | null): Date => {
+      if (!value) return new Date(NaN);
+      if (value instanceof Date) return value;
+      const hasTimezone = /[zZ]|[+-]\d{2}:?\d{2}$/.test(value);
+      const normalized = hasTimezone ? value : `${value}Z`;
+      return new Date(normalized);
+    };
+
+    return {
+      id: apiEvent.id || apiEvent._id,
+      title: apiEvent.title,
+      description: apiEvent.description,
+      startTime: parseDate(apiEvent.start_time),
+      endTime: parseDate(apiEvent.end_time),
+      location: apiEvent.location,
+      category: apiEvent.category,
+      status: apiEvent.status,
+      creatorEmail: apiEvent.creator_email,
+      createdAt: new Date(apiEvent.created_at),
+      updatedAt: new Date(apiEvent.updated_at),
+      metadata: apiEvent.metadata || {}
+    };
+  }
+
+  // Poll methods
+  static async createPoll(meetingId: string, pollData: PollCreate): Promise<Poll> {
+    const apiPoll = await this.makeRequest<any>(`/api/meetings/${meetingId}/polls`, {
+      method: 'POST',
+      body: JSON.stringify({
+        meeting_id: meetingId,
+        question: pollData.question,
+        options: pollData.options
+      })
+    });
+    return this.transformPollFromAPI(apiPoll);
+  }
+
+  static async getMeetingPolls(meetingId: string): Promise<Poll[]> {
+    const apiPolls = await this.makeRequest<any[]>(`/api/meetings/${meetingId}/polls`);
+    return apiPolls.map(poll => this.transformPollFromAPI(poll));
+  }
+
+  static async getPoll(pollId: string): Promise<Poll> {
+    const apiPoll = await this.makeRequest<any>(`/api/polls/${pollId}`);
+    return this.transformPollFromAPI(apiPoll);
+  }
+
+  static async voteOnPoll(pollId: string, optionId: string): Promise<Poll> {
+    const apiPoll = await this.makeRequest<any>(`/api/polls/${pollId}/vote`, {
+      method: 'POST',
+      body: JSON.stringify({ option_id: optionId })
+    });
+    return this.transformPollFromAPI(apiPoll);
+  }
+
+  static async closePoll(pollId: string): Promise<Poll> {
+    const apiPoll = await this.makeRequest<any>(`/api/polls/${pollId}/close`, {
+      method: 'POST'
+    });
+    return this.transformPollFromAPI(apiPoll);
+  }
+
+  static async deletePoll(pollId: string): Promise<void> {
+    await this.makeRequest(`/api/polls/${pollId}`, {
+      method: 'DELETE'
+    });
+  }
+
+  private static transformPollFromAPI(apiPoll: any): Poll {
+    return {
+      id: apiPoll.id || apiPoll._id,
+      meetingId: apiPoll.meeting_id,
+      question: apiPoll.question,
+      options: apiPoll.options.map((opt: any) => ({
+        id: opt.id,
+        text: opt.text,
+        votes: opt.votes || []
+      })),
+      creatorEmail: apiPoll.creator_email,
+      createdAt: new Date(apiPoll.created_at),
+      updatedAt: new Date(apiPoll.updated_at),
+      isClosed: apiPoll.is_closed || false
+    };
+  }
 }
