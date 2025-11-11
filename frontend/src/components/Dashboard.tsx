@@ -136,22 +136,35 @@ export const Dashboard: React.FC = () => {
     }
   };
 
-  const handleMeetingDeleted = async (meetingId: string) => {
+  const handleMeetingDeleted = async (meeting: Meeting) => {
     try {
-      const meetingToDelete = meetings.find(m => m.id === meetingId);
-      await AISchedulerService.deleteMeeting(meetingId);
-      setMeetings(prev => prev.filter(m => m.id !== meetingId));
-      if (meetingToDelete) {
-        notificationService.meetingDeleted(meetingToDelete.title);
-        if (meetingToDelete.metadata?.poll_id) {
-          setPollSummaries(prev => {
-            const next = { ...prev };
-            delete next[meetingToDelete.metadata!.poll_id as string];
-            return next;
-          });
-        }
+      await AISchedulerService.deleteMeeting(meeting.id);
+      setMeetings(prev => prev.filter(m => m.id !== meeting.id));
+      const pollId = meeting.metadata?.poll_id;
+      if (pollId) {
+        setPollSummaries(prev => {
+          const next = { ...prev };
+          delete next[pollId];
+          return next;
+        });
       }
-      await loadCalendar();
+      if (viewMeeting?.id === meeting.id) {
+        setViewMeeting(null);
+      }
+      if (editMeeting?.id === meeting.id) {
+        setEditMeeting(null);
+      }
+      const googleEventId = meeting.metadata?.google_event_id;
+      if (googleEventId) {
+        setCalendarEvents(prev =>
+          prev.filter(event => {
+            const eventId = event.id || event.eventId;
+            return eventId !== googleEventId;
+          })
+        );
+      }
+      notificationService.meetingDeleted(meeting.title);
+      loadCalendar();
     } catch (error) {
       console.error('Error deleting meeting:', error);
       const errorMessage = 'Failed to delete meeting. Please try again.';
@@ -296,7 +309,7 @@ export const Dashboard: React.FC = () => {
             currentTime={currentTime}
             pollSummaries={pollSummaries}
             onEditMeeting={setEditMeeting}
-            onDeleteMeeting={(meeting) => handleMeetingDeleted(meeting.id)}
+            onDeleteMeeting={handleMeetingDeleted}
             onViewMeeting={setViewMeeting}
           />
         </div>
