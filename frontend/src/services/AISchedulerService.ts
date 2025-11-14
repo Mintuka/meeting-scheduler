@@ -417,7 +417,7 @@ export class AISchedulerService {
     };
   }
 
-  private static transformMeetingFromAPI(apiMeeting: any): Meeting {
+  static transformMeetingFromAPI(apiMeeting: any): Meeting {
     return {
       id: apiMeeting.id || apiMeeting._id,
       title: apiMeeting.title,

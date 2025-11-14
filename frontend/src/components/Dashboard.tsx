@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Calendar, Plus, LogOut } from 'lucide-react';
+import { Calendar, Plus, LogOut, Mic } from 'lucide-react';
 import { Meeting, Poll } from '../types';
 import { MeetingForm } from './MeetingForm';
 import { MeetingDetails } from './MeetingDetails';
@@ -11,6 +11,7 @@ import { AISchedulerService } from '../services/AISchedulerService';
 import { notificationService } from '../services/NotificationService';
 import { useAuth } from '../context/AuthContext';
 import { CalendarView } from './CalendarView';
+import { ConversationalAI } from './ConversationalAI';
 
 export const Dashboard: React.FC = () => {
   const { user, isLoading: authLoading, loginWithGoogle, logout } = useAuth();
@@ -18,6 +19,7 @@ export const Dashboard: React.FC = () => {
   const [pollSummaries, setPollSummaries] = useState<Record<string, Poll | null>>({});
   const [showForm, setShowForm] = useState(false);
   const [showEventForm, setShowEventForm] = useState(false);
+  const [showConversationalAI, setShowConversationalAI] = useState(false);
   const [editMeeting, setEditMeeting] = useState<Meeting | null>(null);
   const [viewMeeting, setViewMeeting] = useState<Meeting | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -276,6 +278,13 @@ export const Dashboard: React.FC = () => {
                 Sign out
               </button>
               <button
+                onClick={() => setShowConversationalAI(true)}
+                className="flex items-center px-3 py-2 text-blue-600 hover:bg-blue-50 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 mr-2"
+                title="Schedule with AI"
+              >
+                <Mic className="h-5 w-5" />
+              </button>
+              <button
                 onClick={() => setShowForm(!showForm)}
                 className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
@@ -376,6 +385,27 @@ export const Dashboard: React.FC = () => {
             }}
           />
         )}
+      </Modal>
+
+      {/* Conversational AI Modal */}
+      <Modal
+        isOpen={showConversationalAI}
+        onClose={() => setShowConversationalAI(false)}
+        title=""
+      >
+        <div className="h-[600px]">
+          <ConversationalAI
+            onMeetingCreated={(meeting) => {
+              handleMeetingCreated(meeting, {
+                isPollOnly: false,
+                participantCount: meeting.participants.length,
+                createdPoll: null,
+              });
+              setShowConversationalAI(false);
+            }}
+            onClose={() => setShowConversationalAI(false)}
+          />
+        </div>
       </Modal>
     </div>
   );

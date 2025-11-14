@@ -33,6 +33,7 @@ from app.notification_service import notification_service
 from app.email_reply_listener import EmailReplyListener
 from app.auth import create_access_token, get_current_user_token, get_optional_user_token, security
 from app.ai_service import ai_service
+from app.conversational_ai_service import conversational_ai_service
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
 from app.calendar_service import list_events as calendar_list_events, get_free_busy
@@ -776,6 +777,132 @@ class ConversationalScheduleResponse(BaseModel):
     clarification_message: Optional[str] = None
     parsed_data: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+
+
+class ConversationalMessageRequest(BaseModel):
+    message: str = Field(..., description="User's message in the conversation")
+    conversation_id: Optional[str] = Field(None, description="Optional conversation ID for state management")
+    timezone: Optional[str] = Field(None, description="User's timezone (e.g., 'America/New_York')")
+
+
+class ConversationalMessageResponse(BaseModel):
+    response_message: str
+    conversation_id: str
+    collected_data: Dict[str, Any]
+    is_complete: bool
+    meeting: Optional[Meeting] = None
+    error: Optional[str] = None
+
+
+# In-memory conversation storage (in production, use Redis or database)
+conversation_storage: Dict[str, Dict[str, Any]] = {}
+
+
+@app.post("/api/ai/conversation", response_model=ConversationalMessageResponse)
+async def conversational_message(
+    request: ConversationalMessageRequest,
+    current_user: CurrentUser,
+):
+    """
+    Handle conversational AI messages that ask questions one by one.
+    Maintains conversation state to collect all meeting information.
+    """
+    try:
+        # Get or create conversation state
+        conversation_id = request.conversation_id or str(uuid.uuid4())
+        if conversation_id not in conversation_storage:
+            conversation_storage[conversation_id] = {
+                "history": [],
+                "collected_data": {},
+            }
+        
+        conversation_state = conversation_storage[conversation_id]
+        conversation_history = conversation_state["history"]
+        collected_data = conversation_state["collected_data"]
+        
+        # Add user message to history
+        conversation_history.append({
+            "role": "user",
+            "content": request.message,
+        })
+        
+        # Process the message
+        result = await conversational_ai_service.process_message(
+            user_message=request.message,
+            conversation_history=conversation_history,
+            user_email=current_user.email,
+            user_timezone=request.timezone,
+            collected_data=collected_data,
+        )
+        
+        # Update conversation state
+        conversation_state["collected_data"] = result["collected_data"]
+        conversation_history.append({
+            "role": "assistant",
+            "content": result["response_message"],
+        })
+        
+        # If complete, create the meeting
+        meeting = None
+        if result["is_complete"] and result["meeting_data"]:
+            try:
+                meeting_data = result["meeting_data"]
+                
+                # Validate and create meeting
+                start_time = date_parser.isoparse(meeting_data["start_time"]) if meeting_data.get("start_time") else None
+                end_time = date_parser.isoparse(meeting_data["end_time"]) if meeting_data.get("end_time") else None
+                preferred_date = date_parser.isoparse(meeting_data["preferred_date"]) if meeting_data.get("preferred_date") else None
+                
+                if not start_time or not end_time:
+                    raise ValueError("Start and end times are required")
+                
+                metadata = {
+                    "location_type": meeting_data.get("location_type", "online"),
+                    "ai_generated": True,
+                    "conversational": True,
+                }
+                if meeting_data.get("room_id"):
+                    metadata["room_id"] = meeting_data["room_id"]
+                
+                create_data = MeetingCreate(
+                    title=meeting_data["title"],
+                    description=meeting_data.get("description", ""),
+                    participants=meeting_data.get("participants", []),
+                    start_time=start_time,
+                    end_time=end_time,
+                    preferred_date=preferred_date,
+                    metadata=metadata,
+                )
+                
+                meeting = await meeting_service.create_meeting(
+                    create_data,
+                    metadata,
+                    organizer_email=current_user.email,
+                )
+                
+                # Clear conversation state after successful creation
+                del conversation_storage[conversation_id]
+            except Exception as e:
+                logger.error(f"Error creating meeting from conversational data: {e}", exc_info=True)
+                result["response_message"] = f"I collected all the information, but encountered an error creating the meeting: {str(e)}. Please try again or use the standard form."
+                result["is_complete"] = False
+        
+        return ConversationalMessageResponse(
+            response_message=result["response_message"],
+            conversation_id=conversation_id,
+            collected_data=result["collected_data"],
+            is_complete=result["is_complete"] and meeting is not None,
+            meeting=meeting,
+        )
+    except Exception as e:
+        logger.error(f"Error in conversational message: {e}", exc_info=True)
+        return ConversationalMessageResponse(
+            response_message=f"I encountered an error: {str(e)}. Could you please try again?",
+            conversation_id=request.conversation_id or str(uuid.uuid4()),
+            collected_data={},
+            is_complete=False,
+            error=str(e),
+        )
 
 
 @app.post("/api/ai/schedule", response_model=ConversationalScheduleResponse)

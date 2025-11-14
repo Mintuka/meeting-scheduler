@@ -13,13 +13,13 @@ class AIService:
     """Service for handling AI-powered conversational scheduling using LLM APIs."""
 
     def __init__(self):
-        self.provider = os.getenv("AI_PROVIDER", "openai").lower()
-        self.api_key = os.getenv("AI_API_KEY")
-        self.model = os.getenv("AI_MODEL", "gpt-4o-mini")
+        self.provider = os.getenv("AI_PROVIDER", "gemini").lower()
+        self.api_key = os.getenv("AI_API_KEY") or os.getenv("GEMINI_API_KEY")
+        self.model = os.getenv("AI_MODEL", "gemini-pro")
         self.base_url = os.getenv("AI_BASE_URL")  # For custom endpoints
         
         if not self.api_key:
-            logger.warning("AI_API_KEY not configured. Conversational scheduling will be disabled.")
+            logger.warning("AI_API_KEY or GEMINI_API_KEY not configured. Conversational scheduling will be disabled.")
     
     async def parse_scheduling_request(
         self,
@@ -48,7 +48,9 @@ class AIService:
             raise ValueError("AI service not configured. Please set AI_API_KEY environment variable.")
         
         try:
-            if self.provider == "openai":
+            if self.provider == "gemini":
+                return await self._parse_with_gemini(user_message, user_email, user_timezone)
+            elif self.provider == "openai":
                 return await self._parse_with_openai(user_message, user_email, user_timezone)
             elif self.provider == "anthropic":
                 return await self._parse_with_anthropic(user_message, user_email, user_timezone)
@@ -93,6 +95,49 @@ class AIService:
             
             content = result["choices"][0]["message"]["content"]
             parsed = json.loads(content)
+            
+            # Post-process the parsed data
+            return self._post_process_parsed_data(parsed, user_timezone)
+    
+    async def _parse_with_gemini(
+        self,
+        user_message: str,
+        user_email: str,
+        user_timezone: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Parse using Google Gemini API."""
+        base_url = self.base_url or f"https://generativelanguage.googleapis.com/v1/models/{self.model}:generateContent"
+        
+        system_prompt = self._get_system_prompt(user_timezone)
+        full_prompt = f"{system_prompt}\n\nUser message: {user_message}\n\nPlease respond with only valid JSON matching the structure specified above."
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{base_url}?key={self.api_key}",
+                headers={
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "contents": [{
+                        "parts": [{
+                            "text": full_prompt
+                        }]
+                    }],
+                    "generationConfig": {
+                        "temperature": 0.3,
+                        "maxOutputTokens": 2000,
+                    },
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            if "candidates" not in result or not result["candidates"]:
+                raise ValueError("No response from Gemini API")
+            
+            content = result["candidates"][0]["content"]["parts"][0]["text"]
+            # Extract JSON from response
+            parsed = self._extract_json_from_text(content)
             
             # Post-process the parsed data
             return self._post_process_parsed_data(parsed, user_timezone)
