@@ -32,6 +32,7 @@ import anyio
 from app.notification_service import notification_service
 from app.email_reply_listener import EmailReplyListener
 from app.auth import create_access_token, get_current_user_token, get_optional_user_token
+from app.ai_service import ai_service
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
 from app.calendar_service import list_events as calendar_list_events, get_free_busy
@@ -762,6 +763,157 @@ async def suggest_availability(request: AvailabilityRequest, current_user: Curre
         "participants_missing": missing,
         "participants_missing_details": missing_details,
     }
+
+class ConversationalScheduleRequest(BaseModel):
+    message: str = Field(..., description="Natural language meeting request")
+    timezone: Optional[str] = Field(None, description="User's timezone (e.g., 'America/New_York')")
+
+
+class ConversationalScheduleResponse(BaseModel):
+    success: bool
+    meeting: Optional[Meeting] = None
+    requires_clarification: bool = False
+    clarification_message: Optional[str] = None
+    parsed_data: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+@app.post("/api/ai/schedule", response_model=ConversationalScheduleResponse)
+async def conversational_schedule(
+    request: ConversationalScheduleRequest,
+    current_user: CurrentUser,
+):
+    """
+    Schedule a meeting using natural language.
+    
+    Example requests:
+    - "Schedule a 30-minute meeting with john@example.com tomorrow at 2pm"
+    - "Create a meeting with alice@example.com and bob@example.com next Monday at 10am for 1 hour"
+    - "Set up a team sync with the engineering team tomorrow afternoon"
+    """
+    try:
+        # Parse the natural language request
+        parsed = await ai_service.parse_scheduling_request(
+            user_message=request.message,
+            user_email=current_user.email,
+            user_timezone=request.timezone,
+        )
+        
+        # If clarification is needed, return early
+        if parsed.get("requires_clarification"):
+            return ConversationalScheduleResponse(
+                success=False,
+                requires_clarification=True,
+                clarification_message=parsed.get("clarification_message"),
+                parsed_data=parsed,
+            )
+        
+        # Validate required fields
+        if not parsed.get("title"):
+            return ConversationalScheduleResponse(
+                success=False,
+                requires_clarification=True,
+                clarification_message="Please provide a meeting title.",
+                parsed_data=parsed,
+            )
+        
+        if not parsed.get("participants"):
+            return ConversationalScheduleResponse(
+                success=False,
+                requires_clarification=True,
+                clarification_message="Please specify at least one participant.",
+                parsed_data=parsed,
+            )
+        
+        # Determine start and end times
+        start_time = parsed.get("start_time")
+        end_time = parsed.get("end_time")
+        duration_minutes = parsed.get("duration_minutes", 30)
+        
+        # If no specific time provided, we need clarification
+        if not start_time:
+            return ConversationalScheduleResponse(
+                success=False,
+                requires_clarification=True,
+                clarification_message="Please specify a time for the meeting. For example: 'tomorrow at 2pm' or 'next Monday at 10am'.",
+                parsed_data=parsed,
+            )
+        
+        # Calculate end_time if not provided
+        if not end_time and duration_minutes:
+            from datetime import timedelta
+            end_time = start_time + timedelta(minutes=duration_minutes)
+        elif not end_time:
+            # Default to 30 minutes if no duration specified
+            from datetime import timedelta
+            end_time = start_time + timedelta(minutes=30)
+        
+        # Validate times
+        now = datetime.now(timezone.utc)
+        if start_time <= now:
+            return ConversationalScheduleResponse(
+                success=False,
+                requires_clarification=True,
+                clarification_message="Meeting start time must be in the future. Please specify a future time.",
+                parsed_data=parsed,
+            )
+        
+        if end_time <= start_time:
+            return ConversationalScheduleResponse(
+                success=False,
+                requires_clarification=True,
+                clarification_message="End time must be after start time.",
+                parsed_data=parsed,
+            )
+        
+        # Prepare metadata
+        metadata = parsed.get("metadata", {})
+        metadata["location_type"] = parsed.get("location_type", "online")
+        if parsed.get("room_id"):
+            metadata["room_id"] = parsed.get("room_id")
+        if request.timezone:
+            metadata["timezone"] = request.timezone
+        metadata["ai_generated"] = True
+        metadata["original_message"] = request.message
+        
+        # Create the meeting
+        meeting_data = MeetingCreate(
+            title=parsed["title"],
+            description=parsed.get("description", ""),
+            participants=parsed["participants"],
+            start_time=start_time,
+            end_time=end_time,
+            preferred_date=parsed.get("preferred_date"),
+            metadata=metadata,
+        )
+        
+        meeting = await meeting_service.create_meeting(
+            meeting_data,
+            metadata,
+            organizer_email=current_user.email,
+        )
+        
+        return ConversationalScheduleResponse(
+            success=True,
+            meeting=meeting,
+            requires_clarification=False,
+            parsed_data=parsed,
+        )
+        
+    except ValueError as e:
+        return ConversationalScheduleResponse(
+            success=False,
+            error=str(e),
+            requires_clarification=True,
+            clarification_message=str(e),
+        )
+    except Exception as e:
+        logger.error(f"Error in conversational scheduling: {e}", exc_info=True)
+        return ConversationalScheduleResponse(
+            success=False,
+            error="An error occurred while processing your request. Please try again or use the standard meeting form.",
+        )
+
 
 @app.get("/api/meetings/{meeting_id}", response_model=Meeting)
 async def get_meeting(meeting_id: str, current_user: CurrentUser):

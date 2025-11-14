@@ -285,6 +285,35 @@ export class AISchedulerService {
     );
   }
 
+  static async conversationalSchedule(
+    message: string,
+    timezone?: string
+  ): Promise<{
+    success: boolean;
+    meeting?: Meeting;
+    requires_clarification: boolean;
+    clarification_message?: string;
+    parsed_data?: any;
+    error?: string;
+  }> {
+    const response = await this.makeRequest<any>('/api/ai/schedule', {
+      method: 'POST',
+      body: JSON.stringify({
+        message,
+        timezone: timezone || getBrowserTimeZone(),
+      }),
+    });
+
+    if (response.success && response.meeting) {
+      return {
+        ...response,
+        meeting: this.transformMeetingFromAPI(response.meeting),
+      };
+    }
+
+    return response;
+  }
+
   private static transformMeetingFromAPI(apiMeeting: any): Meeting {
     return {
       id: apiMeeting.id || apiMeeting._id,
