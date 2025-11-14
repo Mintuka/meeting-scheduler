@@ -1,4 +1,4 @@
-import { Meeting, MeetingFormData, AvailabilitySuggestion, Poll, Room, RoomAvailability } from '../types';
+import { Meeting, MeetingFormData, AvailabilitySuggestion, Poll, Room, RoomAvailability, Event, EventFormData } from '../types';
 import { buildDateTimeInTimeZone, getBrowserTimeZone } from '../utils/timezone';
 
 declare global {
@@ -98,6 +98,10 @@ export class AISchedulerService {
     });
   }
 
+  static async getMeetingPolls(meetingId: string): Promise<Poll[]> {
+    return this.makeRequest<Poll[]>(`/api/meetings/${meetingId}/polls`);
+  }
+
   static async getPoll(
     pollId: string,
     options?: { token?: string; voterEmail?: string }
@@ -125,6 +129,25 @@ export class AISchedulerService {
     return this.makeRequest(`/api/polls/${pollId}/finalize`, {
       method: 'POST',
       body: JSON.stringify({ option_id: optionId }),
+    });
+  }
+
+  static async voteOnPoll(pollId: string, optionId: string): Promise<Poll> {
+    return this.makeRequest(`/api/polls/${pollId}/vote`, {
+      method: 'POST',
+      body: JSON.stringify({ option_id: optionId }),
+    });
+  }
+
+  static async closePoll(pollId: string): Promise<Poll> {
+    return this.makeRequest(`/api/polls/${pollId}/close`, {
+      method: 'POST',
+    });
+  }
+
+  static async deletePoll(pollId: string): Promise<void> {
+    await this.makeRequest(`/api/polls/${pollId}`, {
+      method: 'DELETE',
     });
   }
 
@@ -283,6 +306,115 @@ export class AISchedulerService {
       },
       meeting.participants.map(p => p.email)
     );
+  }
+
+  static async conversationalSchedule(
+    message: string,
+    timezone?: string
+  ): Promise<{
+    success: boolean;
+    meeting?: Meeting;
+    requires_clarification: boolean;
+    clarification_message?: string;
+    parsed_data?: any;
+    error?: string;
+  }> {
+    const response = await this.makeRequest<any>('/api/ai/schedule', {
+      method: 'POST',
+      body: JSON.stringify({
+        message,
+        timezone: timezone || getBrowserTimeZone(),
+      }),
+    });
+
+    if (response.success && response.meeting) {
+      return {
+        ...response,
+        meeting: this.transformMeetingFromAPI(response.meeting),
+      };
+    }
+
+    return response;
+  }
+
+  static async createEvent(formData: EventFormData): Promise<Event> {
+    // Parse the date and time strings into Date objects
+    const [year, month, day] = formData.eventDate.split('-').map(Number);
+    const [startHour, startMinute] = formData.startTime.split(':').map(Number);
+    const [endHour, endMinute] = formData.endTime.split(':').map(Number);
+    
+    const startTime = new Date(year, month - 1, day, startHour, startMinute);
+    const endTime = new Date(year, month - 1, day, endHour, endMinute);
+    
+    const payload = {
+      title: formData.title,
+      description: formData.description || '',
+      start_time: startTime.toISOString(),
+      end_time: endTime.toISOString(),
+      location: formData.location,
+      category: formData.category,
+      metadata: {},
+    };
+    
+    const event = await this.makeRequest<any>('/api/events', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    
+    return this.transformEventFromAPI(event);
+  }
+
+  static async getEvents(): Promise<Event[]> {
+    const events = await this.makeRequest<any[]>('/api/events');
+    return events.map(event => this.transformEventFromAPI(event));
+  }
+
+  static async getEvent(eventId: string): Promise<Event> {
+    const event = await this.makeRequest<any>(`/api/events/${eventId}`);
+    return this.transformEventFromAPI(event);
+  }
+
+  static async updateEvent(eventId: string, updateData: Partial<Event>): Promise<Event> {
+    const payload: any = {
+      title: updateData.title,
+      description: updateData.description,
+      location: updateData.location,
+      category: updateData.category,
+      status: updateData.status,
+    };
+    
+    if (updateData.startTime) {
+      payload.start_time = updateData.startTime.toISOString();
+    }
+    if (updateData.endTime) {
+      payload.end_time = updateData.endTime.toISOString();
+    }
+    
+    const event = await this.makeRequest<any>(`/api/events/${eventId}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+    
+    return this.transformEventFromAPI(event);
+  }
+
+  static async deleteEvent(eventId: string): Promise<void> {
+    await this.makeRequest(`/api/events/${eventId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  private static transformEventFromAPI(apiEvent: any): Event {
+    return {
+      id: apiEvent.id || apiEvent._id,
+      title: apiEvent.title,
+      description: apiEvent.description,
+      startTime: new Date(apiEvent.start_time),
+      endTime: new Date(apiEvent.end_time),
+      status: apiEvent.status,
+      location: apiEvent.location,
+      category: apiEvent.category,
+    };
   }
 
   private static transformMeetingFromAPI(apiMeeting: any): Meeting {

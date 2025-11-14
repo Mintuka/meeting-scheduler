@@ -100,3 +100,24 @@ export interface Poll {
   viewer_vote_option_id?: string | null;
   is_deadline_passed?: boolean;
 }
+
+export interface Event {
+  id: string;
+  title: string;
+  description?: string;
+  startTime: Date;
+  endTime: Date;
+  status: 'scheduled' | 'confirmed' | 'cancelled' | 'rescheduled' | 'running' | 'completed';
+  location?: string;
+  category?: string;
+}
+
+export interface EventFormData {
+  title: string;
+  description?: string;
+  eventDate: string; // yyyy-MM-dd
+  startTime: string; // HH:mm
+  endTime: string; // HH:mm
+  location?: string;
+  category?: string;
+}

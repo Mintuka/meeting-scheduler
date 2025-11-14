@@ -1,8 +1,11 @@
-import React, { useState } from 'react';
-import { Calendar, Clock, Users, Mail, Edit, Trash2, RefreshCw, Bell, MapPin, Video, ListChecks } from 'lucide-react';
-import { Meeting } from '../types';
+import React, { useState, useEffect } from 'react';
+import { Calendar, Clock, Users, Mail, Edit, Trash2, RefreshCw, Bell, MapPin, Video, ListChecks, BarChart3, X, Plus } from 'lucide-react';
+import { Meeting, Poll } from '../types';
 import { AISchedulerService } from '../services/AISchedulerService';
 import { notificationService } from '../services/NotificationService';
+import { authService } from '../services/AuthService';
+import { PollForm } from './PollForm';
+import { PollDisplay } from './PollDisplay';
 import {
   formatDateOnly,
   formatTimeOnly,
@@ -89,9 +92,9 @@ export const MeetingList: React.FC<MeetingListProps> = ({
     }
   };
 
-  const handleCreatePoll = async (meetingId: string, pollData: PollCreate) => {
+  const handleCreatePoll = async (meetingId: string, pollData: { options: { start: string; end: string }[]; deadline?: Date }) => {
     try {
-      const poll = await AISchedulerService.createPoll(meetingId, pollData);
+      const poll = await AISchedulerService.createPoll(meetingId, pollData.options, pollData.deadline);
       setPolls(prev => ({
         ...prev,
         [meetingId]: [...(prev[meetingId] || []), poll]
@@ -390,8 +393,8 @@ export const MeetingList: React.FC<MeetingListProps> = ({
                     key={poll.id}
                     poll={poll}
                     onVote={handleVote}
-                    onClose={poll.creatorEmail === userEmail ? handleClosePoll : undefined}
-                    onDelete={poll.creatorEmail === userEmail ? handleDeletePoll : undefined}
+                    onClose={handleClosePoll}
+                    onDelete={handleDeletePoll}
                   />
                 ))}
               </div>
