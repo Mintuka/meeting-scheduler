@@ -39,9 +39,14 @@ def _client_config_from_env() -> Dict[str, Any]:
     }
 
 
-def generate_auth_url(state: Optional[str] = None) -> str:
-    flow = Flow.from_client_config(_client_config_from_env(), scopes=SCOPES)
-    flow.redirect_uri = os.getenv("GOOGLE_REDIRECT_URI")
+def generate_auth_url(state: Optional[str] = None, scopes: Optional[List[str]] = None, redirect_uri: Optional[str] = None) -> str:
+    """Generate Google OAuth authorization URL"""
+    if scopes is None:
+        scopes = SCOPES
+    if redirect_uri is None:
+        redirect_uri = os.getenv("GOOGLE_REDIRECT_URI")
+    flow = Flow.from_client_config(_client_config_from_env(), scopes=scopes)
+    flow.redirect_uri = redirect_uri
     # Note: Exclude include_granted_scopes to avoid Google rejecting 'True' value.
     auth_url, _ = flow.authorization_url(
         access_type="offline",
@@ -51,9 +56,17 @@ def generate_auth_url(state: Optional[str] = None) -> str:
     return auth_url
 
 
-def exchange_code_for_tokens(code: str) -> Dict[str, Any]:
-    flow = Flow.from_client_config(_client_config_from_env(), scopes=SCOPES)
-    flow.redirect_uri = os.getenv("GOOGLE_REDIRECT_URI")
+def exchange_code_for_tokens(code: str, scopes: Optional[List[str]] = None, redirect_uri: Optional[str] = None) -> Dict[str, Any]:
+    """Exchange authorization code for tokens"""
+    if scopes is None:
+        scopes = SCOPES
+    if redirect_uri is None:
+        redirect_uri = os.getenv("GOOGLE_REDIRECT_URI")
+    
+    # Create flow with the same scopes that were used in the authorization URL
+    # Important: Scopes must match exactly what was requested in the auth URL
+    flow = Flow.from_client_config(_client_config_from_env(), scopes=scopes)
+    flow.redirect_uri = redirect_uri
     flow.fetch_token(code=code)
     creds = flow.credentials
     return credentials_to_dict(creds)

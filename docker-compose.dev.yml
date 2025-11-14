@@ -1,18 +1,6 @@
 services:
-  # MongoDB Database (Development)
-  mongodb-dev:
-    image: mongo:7.0
-    ports:
-      - "27017:27017"
-    environment:
-      - MONGO_INITDB_ROOT_USERNAME=admin
-      - MONGO_INITDB_ROOT_PASSWORD=password
-      - MONGO_INITDB_DATABASE=meeting_scheduler
-    volumes:
-      - mongodb_dev_data:/data/db
-    networks:
-      - app-network
-    restart: unless-stopped
+  # Note: Using MongoDB Atlas cloud database from docker.env
+  # Local MongoDB service removed - using MONGODB_URL from docker.env instead
 
   # Frontend React Application (Development)
   frontend-dev:
@@ -49,16 +37,12 @@ services:
       - NODE_ENV=development
       - PORT=8000
       - FRONTEND_URL=http://localhost:3000
-      - MONGODB_URL=mongodb+srv://mintesnot:b1JLUsSpRLXaEPCG@ma-8745.lxs3s.mongodb.net/?retryWrites=true&w=majority&appName=MA-8745
-      - MONGODB_DATABASE=meeting_scheduler
+      # MONGODB_URL and MONGODB_DATABASE are loaded from docker.env
     volumes:
       - ./backend:/app
     networks:
       - app-network
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-
-volumes:
-  mongodb_dev_data:
 
 networks:
   app-network:
