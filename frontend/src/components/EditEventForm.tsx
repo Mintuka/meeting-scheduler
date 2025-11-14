@@ -86,7 +86,6 @@ export const EditEventForm: React.FC<EditEventFormProps> = ({ event, onClose, on
         endTime: end,
         location: data.location,
         category: data.category,
-        metadata: event.metadata,
       });
 
       onUpdated(updated, 'Event details have been updated');

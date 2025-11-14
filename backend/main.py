@@ -28,11 +28,10 @@ from app.google_calendar import (
     update_event,
     delete_event,
 )
-from app.auth import create_access_token, verify_token, get_google_user_info
 import anyio
 from app.notification_service import notification_service
 from app.email_reply_listener import EmailReplyListener
-from app.auth import create_access_token, get_current_user_token, get_optional_user_token
+from app.auth import create_access_token, get_current_user_token, get_optional_user_token, security
 from app.ai_service import ai_service
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
@@ -919,13 +918,9 @@ async def conversational_schedule(
 @app.get("/api/meetings/{meeting_id}", response_model=Meeting)
 async def get_meeting(meeting_id: str, current_user: CurrentUser):
     """Get a specific meeting by ID"""
-    user = await get_current_user(credentials)
-    user_email = user.get("email") if user else None
-    
     meeting = await meeting_service.get_meeting(meeting_id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
-    _ensure_meeting_owner(meeting, current_user)
     _ensure_meeting_owner(meeting, current_user)
 
     if meeting.status == "completed" or meeting.end_time <= datetime.now(timezone.utc):
@@ -935,11 +930,6 @@ async def get_meeting(meeting_id: str, current_user: CurrentUser):
 @app.put("/api/meetings/{meeting_id}", response_model=Meeting)
 async def update_meeting(meeting_id: str, meeting_update: MeetingUpdate, current_user: CurrentUser):
     """Update a meeting"""
-    user = await get_current_user(credentials)
-    user_email = user.get("email") if user else None
-    if not user_email:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
     # Validate new times against current meeting to ensure min duration and proper ordering
     current_meeting = await meeting_service.get_meeting(meeting_id)
     if not current_meeting:
@@ -1080,11 +1070,6 @@ async def delete_meeting(meeting_id: str, current_user: CurrentUser):
 @app.post("/api/meetings/{meeting_id}/send-invitation")
 async def send_invitation(meeting_id: str, current_user: CurrentUser):
     """Send invitation for a meeting to all participants"""
-    user = await get_current_user(credentials)
-    user_email = user.get("email") if user else None
-    if not user_email:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
     meeting = await meeting_service.get_meeting(meeting_id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
@@ -1299,6 +1284,24 @@ async def create_poll(meeting_id: str, request: CreatePollRequest, current_user:
     return poll
 
 
+@app.get("/api/meetings/{meeting_id}/polls")
+async def get_meeting_polls(meeting_id: str, current_user: OptionalCurrentUser = None):
+    """Get all polls for a meeting"""
+    meeting = await meeting_service.get_meeting(meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    
+    polls = await poll_service.get_polls_for_meeting(meeting_id)
+    
+    # Serialize polls with viewer email if authenticated
+    viewer_email = current_user.email if current_user else None
+    serialized_polls = []
+    for poll in polls:
+        serialized_polls.append(_serialize_poll(poll, meeting, viewer_email))
+    
+    return serialized_polls
+
+
 @app.get("/api/polls/{poll_id}")
 async def get_poll(
     poll_id: str,
@@ -1343,48 +1346,6 @@ async def vote_poll(poll_id: str, request: VoteRequest, current_user: OptionalCu
     )
     if not voter_email:
         raise HTTPException(status_code=403, detail="Sign in or use your personalized poll link to vote.")
-
-@app.post("/api/polls/{poll_id}/vote")
-async def vote_poll(poll_id: str, request: VoteRequest, current_user: OptionalCurrentUser = None):
-    poll = await poll_service.get_poll(poll_id)
-    if not poll:
-        raise HTTPException(status_code=404, detail="Poll not found")
-
-    meeting = await meeting_service.get_meeting(poll.meeting_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found for poll")
-
-    voter_email = _resolve_voter_identity(
-        poll,
-        meeting,
-        request.token,
-        request.voter_email,
-        current_user,
-        require_identity=True,
-    )
-    if not voter_email:
-        raise HTTPException(status_code=403, detail="Sign in or use your personalized poll link to vote.")
-
-@app.get("/api/google/callback")
-async def google_oauth_callback(code: str = None, state: str = None, error: str = None):
-    """OAuth callback to exchange authorization code for tokens - handles both auth and calendar flows"""
-    from fastapi.responses import RedirectResponse
-    from fastapi import Request
-    
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-    redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/api/google/callback")
-    
-    # Handle OAuth errors from Google
-    if error:
-        error_message = f"OAuth error: {error}"
-        return RedirectResponse(url=f"{frontend_url}?error=auth_failed&message={error_message}")
-    
-    # Check if code is provided
-    if not code:
-        return RedirectResponse(url=f"{frontend_url}?error=auth_failed&message=No authorization code provided")
-    
-    # Check if this is an authentication flow (state starts with "auth_")
-    is_auth_flow = state and state.startswith("auth_")
     
     try:
         poll = await poll_service.add_vote(poll_id, request.option_id, voter_email)
@@ -1464,126 +1425,13 @@ async def delete_metadata(key: str, current_user: CurrentUser):
         raise HTTPException(status_code=404, detail="Metadata not found")
     return {"message": "Metadata deleted successfully"}
 
-# Event endpoints
-@app.get("/api/events", response_model=List[Event])
-async def get_events(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
-    """Get all events for the current user"""
-    user = await get_current_user(credentials)
-    user_email = user.get("email") if user else None
-    
-    # If authenticated, filter by user email (events created by user)
-    # If not authenticated, return empty list
-    if not user_email:
-        return []  # Or raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    return await event_service.get_all_events(user_email=user_email)
-
-@app.post("/api/events", response_model=Event)
-async def create_event(event_data: EventCreate, credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
-    """Create a new event"""
-    # Get authenticated user
-    user = await get_current_user(credentials)
-    if not user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    user_email = user.get("email")
-    if not user_email:
-        raise HTTPException(status_code=401, detail="User email not found")
-    
-    # Validate that end time is after start time
-    if event_data.end_time <= event_data.start_time:
-        raise HTTPException(status_code=400, detail="End time must be after start time")
-    # Enforce minimum event duration of 5 minutes
-    from datetime import timedelta
-    if (event_data.end_time - event_data.start_time) < timedelta(minutes=5):
-        raise HTTPException(status_code=400, detail="Event duration must be at least 5 minutes")
-
-    # Create event in DB with creator email
-    event = await event_service.create_event(event_data, creator_email=user_email, metadata=event_data.metadata)
-    return event
-
-@app.get("/api/events/{event_id}", response_model=Event)
-async def get_event(event_id: str, credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
-    """Get a specific event by ID"""
-    user = await get_current_user(credentials)
-    user_email = user.get("email") if user else None
-    
-    event = await event_service.get_event(event_id)
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-    
-    # Check if user is the creator
-    if user_email:
-        if event.creator_email != user_email:
-            raise HTTPException(status_code=403, detail="You don't have access to this event")
-    else:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    return event
-
-@app.put("/api/events/{event_id}", response_model=Event)
-async def update_event(event_id: str, event_update: EventUpdate, credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
-    """Update an event"""
-    user = await get_current_user(credentials)
-    user_email = user.get("email") if user else None
-    if not user_email:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    # Validate new times against current event to ensure min duration and proper ordering
-    current_event = await event_service.get_event(event_id)
-    if not current_event:
-        raise HTTPException(status_code=404, detail="Event not found")
-
-    # Check if user is the creator
-    if current_event.creator_email != user_email:
-        raise HTTPException(status_code=403, detail="You don't have permission to update this event")
-
-    if current_event.status == "completed" or current_event.end_time <= datetime.utcnow():
-        raise HTTPException(status_code=400, detail="Completed events cannot be modified.")
-
-    # Determine proposed start/end times using provided values or existing
-    proposed_start = event_update.start_time or current_event.start_time
-    proposed_end = event_update.end_time or current_event.end_time
-
-    if proposed_end <= proposed_start:
-        raise HTTPException(status_code=400, detail="End time must be after start time")
-    from datetime import timedelta
-    if (proposed_end - proposed_start) < timedelta(minutes=5):
-        raise HTTPException(status_code=400, detail="Event duration must be at least 5 minutes")
-
-    # If timing changed and no explicit status provided, mark as rescheduled for clarity
-    time_changed = (
-        (event_update.start_time and event_update.start_time != current_event.start_time)
-        or (event_update.end_time and event_update.end_time != current_event.end_time)
-    )
-    if time_changed and event_update.status is None:
-        event_update.status = "rescheduled"
-
-    event = await event_service.update_event(event_id, event_update)
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-    return event
-
-@app.delete("/api/events/{event_id}")
-async def delete_event(event_id: str, credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
-    """Delete an event"""
-    user = await get_current_user(credentials)
-    user_email = user.get("email") if user else None
-    if not user_email:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    event = await event_service.get_event(event_id)
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-    
-    # Check if user is the creator
-    if event.creator_email != user_email:
-        raise HTTPException(status_code=403, detail="You don't have permission to delete this event")
-    
-    success = await event_service.delete_event(event_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Event not found")
-    return {"message": "Event deleted successfully"}
+# Event endpoints - DISABLED: Event model and EventService not implemented
+# TODO: Implement Event model, EventCreate, EventUpdate, and EventService to enable these endpoints
+# @app.get("/api/events", response_model=List[Event])
+# @app.post("/api/events", response_model=Event)
+# @app.get("/api/events/{event_id}", response_model=Event)
+# @app.put("/api/events/{event_id}", response_model=Event)
+# @app.delete("/api/events/{event_id}")
 
 @app.put("/api/meetings/{meeting_id}/metadata")
 async def update_meeting_metadata(
@@ -1597,174 +1445,7 @@ async def update_meeting_metadata(
         raise HTTPException(status_code=404, detail="Meeting not found")
     return meeting
 
-# Poll endpoints
-@app.post("/api/meetings/{meeting_id}/polls", response_model=Poll)
-async def create_poll(
-    meeting_id: str,
-    poll_data: PollCreate,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
-):
-    """Create a poll for a meeting (only meeting creator can create polls)"""
-    user = await get_current_user(credentials)
-    user_email = user.get("email") if user else None
-    if not user_email:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    # Verify meeting exists and user is a participant
-    meeting = await meeting_service.get_meeting(meeting_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
-    
-    participant_emails = [p.email for p in meeting.participants]
-    if user_email not in participant_emails:
-        raise HTTPException(status_code=403, detail="You must be a participant to create polls")
-    
-    # Check if user is the meeting creator (first participant is the creator)
-    if meeting.participants and meeting.participants[0].email != user_email:
-        raise HTTPException(status_code=403, detail="Only the meeting creator can create polls")
-    
-    # Set meeting_id from URL parameter
-    poll_data.meeting_id = meeting_id
-    
-    # Create poll
-    poll = await poll_service.create_poll(poll_data, creator_email=user_email)
-    return poll
-
-@app.get("/api/meetings/{meeting_id}/polls", response_model=List[Poll])
-async def get_meeting_polls(
-    meeting_id: str,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
-):
-    """Get all polls for a meeting"""
-    user = await get_current_user(credentials)
-    user_email = user.get("email") if user else None
-    if not user_email:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    # Verify meeting exists and user is a participant
-    meeting = await meeting_service.get_meeting(meeting_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
-    
-    participant_emails = [p.email for p in meeting.participants]
-    if user_email not in participant_emails:
-        raise HTTPException(status_code=403, detail="You must be a participant to view polls")
-    
-    polls = await poll_service.get_polls_for_meeting(meeting_id)
-    return polls
-
-@app.get("/api/polls/{poll_id}", response_model=Poll)
-async def get_poll(
-    poll_id: str,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
-):
-    """Get a specific poll by ID"""
-    user = await get_current_user(credentials)
-    user_email = user.get("email") if user else None
-    if not user_email:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    poll = await poll_service.get_poll(poll_id)
-    if not poll:
-        raise HTTPException(status_code=404, detail="Poll not found")
-    
-    # Verify user is a participant in the meeting
-    meeting = await meeting_service.get_meeting(poll.meeting_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
-    
-    participant_emails = [p.email for p in meeting.participants]
-    if user_email not in participant_emails:
-        raise HTTPException(status_code=403, detail="You must be a participant to view this poll")
-    
-    return poll
-
-@app.post("/api/polls/{poll_id}/vote", response_model=Poll)
-async def vote_on_poll(
-    poll_id: str,
-    vote_data: Dict[str, str],
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
-):
-    """Vote on a poll option"""
-    user = await get_current_user(credentials)
-    user_email = user.get("email") if user else None
-    if not user_email:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    option_id = vote_data.get("option_id")
-    if not option_id:
-        raise HTTPException(status_code=400, detail="option_id is required")
-    
-    # Verify poll exists
-    poll = await poll_service.get_poll(poll_id)
-    if not poll:
-        raise HTTPException(status_code=404, detail="Poll not found")
-    
-    # Verify user is a participant in the meeting
-    meeting = await meeting_service.get_meeting(poll.meeting_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
-    
-    participant_emails = [p.email for p in meeting.participants]
-    if user_email not in participant_emails:
-        raise HTTPException(status_code=403, detail="You must be a participant to vote")
-    
-    # Use authenticated user's email
-    updated_poll = await poll_service.vote_on_poll(poll_id, option_id, user_email)
-    if not updated_poll:
-        raise HTTPException(status_code=400, detail="Failed to vote on poll")
-    
-    return updated_poll
-
-@app.post("/api/polls/{poll_id}/close", response_model=Poll)
-async def close_poll(
-    poll_id: str,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
-):
-    """Close a poll (only creator can close)"""
-    user = await get_current_user(credentials)
-    user_email = user.get("email") if user else None
-    if not user_email:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    poll = await poll_service.get_poll(poll_id)
-    if not poll:
-        raise HTTPException(status_code=404, detail="Poll not found")
-    
-    # Only poll creator can close it
-    if poll.creator_email != user_email:
-        raise HTTPException(status_code=403, detail="Only poll creator can close the poll")
-    
-    closed_poll = await poll_service.close_poll(poll_id)
-    if not closed_poll:
-        raise HTTPException(status_code=400, detail="Failed to close poll")
-    
-    return closed_poll
-
-@app.delete("/api/polls/{poll_id}")
-async def delete_poll(
-    poll_id: str,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
-):
-    """Delete a poll (only creator can delete)"""
-    user = await get_current_user(credentials)
-    user_email = user.get("email") if user else None
-    if not user_email:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    poll = await poll_service.get_poll(poll_id)
-    if not poll:
-        raise HTTPException(status_code=404, detail="Poll not found")
-    
-    # Only poll creator can delete it
-    if poll.creator_email != user_email:
-        raise HTTPException(status_code=403, detail="Only poll creator can delete the poll")
-    
-    success = await poll_service.delete_poll(poll_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Poll not found")
-    
-    return {"message": "Poll deleted successfully"}
+# Duplicate/broken poll endpoints removed - use the working endpoints above (lines 1265-1407)
 
 @app.exception_handler(404)
 async def not_found_handler(request, exc):

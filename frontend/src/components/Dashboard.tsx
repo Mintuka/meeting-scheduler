@@ -216,7 +216,7 @@ export const Dashboard: React.FC = () => {
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-          <p className="text-gray-600">{isAuthLoading ? 'Checking authentication...' : 'Loading data...'}</p>
+          <p className="text-gray-600">{authLoading ? 'Checking authentication...' : 'Loading data...'}</p>
         </div>
       </div>
     );
@@ -332,17 +332,16 @@ export const Dashboard: React.FC = () => {
             onViewMeeting={setViewMeeting}
           />
         </div>
-      )}
-
-        {/* Meeting Form Modal */}
-        <Modal
-          isOpen={showForm}
-          onClose={() => setShowForm(false)}
-          title="Create New Meeting"
-        >
-          <MeetingForm onMeetingCreated={handleMeetingCreated} />
-        </Modal>
       </div>
+
+      {/* Meeting Form Modal */}
+      <Modal
+        isOpen={showForm}
+        onClose={() => setShowForm(false)}
+        title="Create New Meeting"
+      >
+        <MeetingForm onMeetingCreated={handleMeetingCreated} />
+      </Modal>
 
       {/* Edit Meeting Modal */}
       <Modal

@@ -624,3 +624,27 @@ class PollService:
             except Exception as exc:
                 logger.error("Auto finalization failed for poll %s: %s", poll.id, exc)
         return finalized
+
+    async def get_polls_for_meeting(self, meeting_id: str) -> List[Poll]:
+        """Get all polls for a meeting"""
+        polls: List[Poll] = []
+        cursor = self.collection.find({"meeting_id": meeting_id})
+        async for poll_doc in cursor:
+            polls.append(Poll(**poll_doc))
+        return polls
+
+    async def vote_on_poll(self, poll_id: str, option_id: str, voter_email: str) -> Optional[Poll]:
+        """Alias for add_vote for API consistency"""
+        return await self.add_vote(poll_id, option_id, voter_email)
+
+    async def close_poll(self, poll_id: str) -> Optional[Poll]:
+        """Alias for finalize_poll for API consistency"""
+        return await self.finalize_poll(poll_id)
+
+    async def delete_poll(self, poll_id: str) -> bool:
+        """Delete a poll"""
+        try:
+            result = await self.collection.delete_one({"_id": ObjectId(poll_id)})
+            return result.deleted_count > 0
+        except Exception:
+            return False
